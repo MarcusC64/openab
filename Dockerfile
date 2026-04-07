@@ -29,12 +29,13 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -s /bin/bash -u 1000 agent
-RUN mkdir -p /home/agent/.local/share/kiro-cli /home/agent/.kiro && \
+RUN mkdir -p /home/agent/.local/share/kiro-cli /home/agent/.kiro /etc/openab && \
     chown -R agent:agent /home/agent
 ENV HOME=/home/agent
 WORKDIR /home/agent
 
 COPY --from=builder --chown=agent:agent /build/target/release/openab /usr/local/bin/openab
+COPY --chown=agent:agent config.toml /etc/openab/config.toml
 
 USER agent
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
