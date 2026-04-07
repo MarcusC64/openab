@@ -36,9 +36,11 @@ WORKDIR /home/agent
 
 COPY --from=builder --chown=agent:agent /build/target/release/openab /usr/local/bin/openab
 COPY --chown=agent:agent config.toml /etc/openab/config.toml
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 USER agent
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD pgrep -x openab || exit 1
-ENTRYPOINT ["openab"]
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/etc/openab/config.toml"]
