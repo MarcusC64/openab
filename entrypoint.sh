@@ -5,7 +5,7 @@ set -e
 if [ -n "$KIRO_AUTH_B64" ]; then
   echo "[entrypoint] Restoring kiro-cli token..."
   mkdir -p "$HOME/.local/share/kiro-cli"
-  printf '%s' "$KIRO_AUTH_B64" | tr -d ' \n\r\t' | tr '-_' '+/' | base64 -d --ignore-garbage | gunzip > "$HOME/.local/share/kiro-cli/data.sqlite3"
+  printf '%s' "$KIRO_AUTH_B64" | tr -d ' \n\r\t' | tr -- '-_' '+/' | base64 -d --ignore-garbage | gunzip > "$HOME/.local/share/kiro-cli/data.sqlite3"
   chmod 600 "$HOME/.local/share/kiro-cli/data.sqlite3"
   SIZE=$(wc -c < "$HOME/.local/share/kiro-cli/data.sqlite3")
   echo "[entrypoint] Token restored: ${SIZE} bytes at $HOME/.local/share/kiro-cli/data.sqlite3"
