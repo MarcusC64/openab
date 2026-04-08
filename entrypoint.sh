@@ -8,4 +8,7 @@ if [ -n "$KIRO_AUTH_B64" ]; then
   chmod 600 "$HOME/.local/share/kiro-cli/data.sqlite3"
 fi
 
+# Clear active session so kiro-cli ACP can re-authenticate with stored tokens
+kiro-cli logout 2>/dev/null || true
+
 exec openab "$@"
