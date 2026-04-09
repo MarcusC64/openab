@@ -21,10 +21,9 @@ pub struct Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-        if msg.author.bot {
-            return;
-        }
-
+        if msg.author.bot && msg.author.id == bot_id {
+    return;
+}
         let bot_id = ctx.cache.current_user().id;
 
         let channel_id = msg.channel_id.get();
