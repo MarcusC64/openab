@@ -21,7 +21,8 @@ pub struct Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-if msg.author.bot {
+// Allow webhook messages through; only skip regular bots
+if msg.author.bot && msg.webhook_id.is_none() {
     return;
 }
         let bot_id = ctx.cache.current_user().id;
@@ -93,19 +94,10 @@ if msg.author.bot {
 
         tracing::debug!(prompt = %prompt_with_sender, in_thread, "processing");
 
-        let thread_id = if in_thread {
-            msg.channel_id.get()
-        } else {
-            match get_or_create_thread(&ctx, &msg, &prompt).await {
-                Ok(id) => id,
-                Err(e) => {
-                    error!("failed to create thread: {e}");
-                    return;
-                }
-            }
-        };
-
-        let thread_channel = ChannelId::new(thread_id);
+        // In allowed channels, reply directly without creating a thread.
+        // Only use thread channel when already inside a thread.
+        let thread_key = msg.channel_id.to_string();
+        let thread_channel = msg.channel_id;
 
         let thinking_msg = match thread_channel.say(&ctx.http, "...").await {
             Ok(m) => m,
