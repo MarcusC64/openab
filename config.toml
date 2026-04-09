@@ -1,6 +1,6 @@
 [discord]
 bot_token = "${DISCORD_BOT_TOKEN}"
-allowed_channels = ["1490914497123188758"]
+allowed_channels = ["1490914497123188758", "1491647157202063483"]
 
 [agent]
 command = "kiro-cli"
