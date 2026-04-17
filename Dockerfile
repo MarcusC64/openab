@@ -32,6 +32,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 RUN useradd -m -s /bin/bash -u 1000 agent
 RUN mkdir -p /home/agent/.local/share/kiro-cli /home/agent/.kiro && \
     chown -R agent:agent /home/agent
+RUN mkdir -p /etc/openab
+COPY config.toml /etc/openab/config.toml
 ENV HOME=/home/agent
 WORKDIR /home/agent
 
