@@ -29,6 +29,10 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with $cfg.extraInitContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: openab
           image: {{ include "openab.agentImage" $d | quote }}
@@ -66,11 +70,26 @@ spec:
                   name: {{ include "openab.agentFullname" $d }}
                   key: stt-api-key
             {{- end }}
+            {{- if and ($cfg.gateway).enabled ($cfg.gateway).token }}
+            - name: GATEWAY_WS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "openab.agentFullname" $d }}
+                  key: gateway-ws-token
+            {{- end }}
             - name: HOME
               value: {{ $cfg.workingDir | default "/home/agent" }}
             {{- range $k, $v := $cfg.env }}
             - name: {{ $k }}
               value: {{ $v | quote }}
+            {{- end }}
+            {{- include "openab.validateSecretEnv" (dict "secretEnv" $cfg.secretEnv "agentName" $name) }}
+            {{- range $cfg.secretEnv }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: {{ .secretKey }}
             {{- end }}
           {{- with $cfg.envFrom }}
           envFrom:
@@ -99,6 +118,14 @@ spec:
               mountPath: {{ $cfg.workingDir | default "/home/agent" }}/GEMINI.md
               subPath: AGENTS.md
             {{- end }}
+            - name: tmp
+              mountPath: /tmp
+            {{- with $cfg.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      {{- with $cfg.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with $cfg.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -118,7 +145,12 @@ spec:
         {{- if $pvcEnabled }}
         - name: data
           persistentVolumeClaim:
-            claimName: {{ include "openab.agentFullname" $d }}
+            claimName: {{ (and $cfg.persistence $cfg.persistence.existingClaim) | default (include "openab.agentFullname" $d) }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+        {{- with $cfg.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
 {{- end }}
 {{- end }}

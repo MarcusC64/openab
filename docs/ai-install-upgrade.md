@@ -41,13 +41,15 @@ rollback openab per the upgrade SOP — the upgrade to v0.7.7 failed
                              │             pass      fail
                              │               │         │
                              ▼               ▼         ▼
-                        ┌─────────┐    ┌─────────┐ ┌──────────┐
-                        │  ABORT  │    │  DONE ✅ │ │5. ROLLBACK│
-                        │         │    └─────────┘ │          │
-                        └─────────┘                │ uninstall│
-                                                   │ reinstall│
-                                                   │ restore  │
-                                                   └──────────┘
+                        ┌─────────┐    ┌──────────┐ ┌──────────┐
+                        │  ABORT  │    │6. CLEANUP│ │5. ROLLBACK│
+                        │         │    │  (ask    │ │          │
+                        └─────────┘    │  user)   │ │ uninstall│
+                                       └────┬─────┘ │ reinstall│
+                                            ▼       │ restore  │
+                                       ┌─────────┐  └──────────┘
+                                       │  DONE ✅ │
+                                       └─────────┘
 ```
 
 **Invariant:** At every point, the system is either running the current version, running the target version, or being restored to the current version. No data is lost.
@@ -100,6 +102,15 @@ rollback openab per the upgrade SOP — the upgrade to v0.7.7 failed
 
 > **Pod label selector:** `app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component=kiro`
 
+> **Gateway config migration (one-time, if applicable):** If you previously enabled a custom gateway by manually patching the ConfigMap (e.g. adding `[gateway]` to `config.toml` by hand), that block is not captured by `helm get values`. Before upgrading, copy the gateway settings into your `values.yaml` under `agents.<name>.gateway` and set `enabled: true` so they are preserved on every subsequent `helm upgrade`. See chart `values.yaml` for the field reference (`enabled`, `url`, `platform`, `token`, `botUsername`). After migrating, do not manually edit the ConfigMap again — manage gateway config through `values.yaml` only.
+
+> **Usercron path migration (v0.8.2+):** The usercron `cronjob.toml` path resolution changed from `$HOME/` to `$HOME/.openab/`. If you have an existing `cronjob.toml` in the agent's home directory, move it before upgrading:
+> ```
+> mkdir -p $HOME/.openab
+> mv $HOME/cronjob.toml $HOME/.openab/cronjob.toml
+> ```
+> The scheduler will not pick up the file from the old location. Hot-reload (polling every 60s) will detect the file once it is in the correct path.
+
 ---
 
 ## 3. Upgrade
@@ -134,8 +145,16 @@ rollback openab per the upgrade SOP — the upgrade to v0.7.7 failed
   │  ✓ no panic/fatal in logs                        │
   │  ✓ "bot connected" in logs                       │
   │  ✓ helm chart version matches TARGET             │
+  │  ✓ (if gateway enabled) no gateway disconnect    │
+  │    errors in logs; verify Cloudflare tunnel URL  │
+  │    is still reachable and update values.yaml if  │
+  │    the URL has rotated                           │
+  │  ✓ (if usercron enabled) cronjob.toml loaded     │
+  │    — check for "loaded usercron jobs" in logs;   │
+  │    if you see "no cronjobs yet" instead, verify  │
+  │    file is at $HOME/.openab/cronjob.toml         │
   │                                                  │
-  │  ALL PASS ──► ✅ DONE                             │
+  │  ALL PASS ──► proceed to 6. CLEANUP            │
   │  ANY FAIL ──► proceed to 5. ROLLBACK             │
   └─────────────────────────────────────────────────┘
 ```
@@ -150,7 +169,7 @@ rollback openab per the upgrade SOP — the upgrade to v0.7.7 failed
   Step ①  Uninstall failed deployment
   ┌──────────┐
   │ helm     │──► release gone
-  │ uninstall│──► delete leftover PVC/secrets
+  │ uninstall│──► chart PVCs are retained
   └────┬─────┘
        ▼
   Step ②  Reinstall previous version
@@ -175,6 +194,46 @@ rollback openab per the upgrade SOP — the upgrade to v0.7.7 failed
   │ ✅ Rollback complete
   └──────────────────────────────────────────────
 ```
+
+> **PVC retention:** OpenAB chart-created PVCs are kept on `helm uninstall` to protect auth/session data. Delete a retained PVC manually only when you intentionally want to discard that state. `persistence.existingClaim` PVCs are owned outside the chart and are never created or deleted by OpenAB.
+>
+> **Upgrade path:** Existing installations will gain the `helm.sh/resource-policy: keep` annotation on their PVCs upon the next `helm upgrade`. This is an additive-only change — it does not alter runtime behavior and only takes effect on a subsequent `helm uninstall`.
+
+---
+
+## 6. Cleanup (post-upgrade)
+
+**Goal:** After a successful upgrade, evaluate old backups and let the user decide what to keep.
+
+> **[AI Instruction]** This phase is advisory. List what you find and ask the user — do NOT auto-delete anything.
+
+```
+  Local Disk
+  ┌──────────────────────────────────────────────┐
+  │  ~/openab-backups/                           │
+  │  ├── 0.7.5_20260401/  (1.2 GB)              │
+  │  ├── 0.7.6_20260415/  (1.4 GB)              │
+  │  └── 0.7.7_20260501/  (1.5 GB)  ◄── current │
+  └──────────────────────────────────────────────┘
+
+  Step ①  List all backup directories with size and date
+  Step ②  Show total disk usage
+  Step ③  Ask the user which backups to remove (if any)
+```
+
+**What to report:**
+
+| Item | Command |
+|------|---------|
+| Backup dirs | `du -sh ~/openab-backups/*/` |
+| Total size | `du -sh ~/openab-backups/` |
+
+**Then ask the user:**
+- Which old backups to delete (if any)
+- Whether to keep the most recent N backups as a policy going forward
+- Recommend keeping at least the latest stable backup as a safety net
+
+**Do NOT** delete anything without explicit user confirmation.
 
 ---
 

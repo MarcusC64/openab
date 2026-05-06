@@ -57,3 +57,104 @@ tests:
       - matchRegex:
           path: data["config.toml"]
           pattern: 'allow_bot_messages = "off"'
+
+  - it: renders allow_user_messages = "involved"
+    set:
+      agents.kiro.discord.allowUserMessages: involved
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'allow_user_messages = "involved"'
+
+  - it: renders allow_user_messages = "mentions"
+    set:
+      agents.kiro.discord.allowUserMessages: mentions
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'allow_user_messages = "mentions"'
+
+  - it: renders allow_user_messages = "multibot-mentions"
+    set:
+      agents.kiro.discord.allowUserMessages: multibot-mentions
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'allow_user_messages = "multibot-mentions"'
+
+  - it: rejects invalid allowUserMessages value
+    set:
+      agents.kiro.discord.allowUserMessages: yolo
+    asserts:
+      - failedTemplate:
+          errorPattern: "must be one of: involved, mentions, multibot-mentions"
+
+  - it: renders slack allow_user_messages = "multibot-mentions"
+    set:
+      agents.kiro.slack.enabled: true
+      agents.kiro.slack.allowUserMessages: multibot-mentions
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'allow_user_messages = "multibot-mentions"'
+
+  - it: renders allow_dm = false by default
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'allow_dm = false'
+
+  - it: renders allow_dm = true when set
+    set:
+      agents.kiro.discord.allowDm: true
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'allow_dm = true'
+
+  - it: renders allow_dm = false when explicitly set
+    set:
+      agents.kiro.discord.allowDm: false
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'allow_dm = false'
+
+  - it: renders discord max_bot_turns when set
+    set:
+      agents.kiro.discord.maxBotTurns: 50
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'max_bot_turns = 50'
+
+  - it: does not render discord max_bot_turns when unset
+    asserts:
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: 'max_bot_turns'
+
+  - it: renders slack max_bot_turns when set
+    set:
+      agents.kiro.slack.enabled: true
+      agents.kiro.slack.maxBotTurns: 30
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'max_bot_turns = 30'
+
+  - it: renders inherit_env as TOML array
+    set:
+      agents.kiro.inheritEnv:
+        - "API_BASE_URL"
+        - "MODEL_NAME"
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'inherit_env = \["API_BASE_URL","MODEL_NAME"\]'
+
+  - it: does not render inherit_env when unset
+    asserts:
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: 'inherit_env'
