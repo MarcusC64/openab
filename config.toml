@@ -1,6 +1,6 @@
 [discord]
 bot_token = "${DISCORD_BOT_TOKEN}"
-allowed_channels = "${DISCORD_CHANNEL_ID}"
+allowed_channels = ["${DISCORD_CHANNEL_ID}"]
 # allowed_channels = ["1490914497123188758", "1491647157202063483"]
 # allowed_users = ["<YOUR_DISCORD_USER_ID>"]  # empty or omitted = allow all users
 # allow_bot_messages = "off"  # "off" (default) | "mentions" | "all"
@@ -51,5 +51,5 @@ done_hold_ms = 1500
 error_hold_ms = 2500
 
 [stt]
-enabled = true
+enabled = false
 api_key = "${GROQ_API_KEY}"

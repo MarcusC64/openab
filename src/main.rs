@@ -447,6 +447,9 @@ async fn main() -> anyhow::Result<()> {
 fn parse_id_set(raw: &[String], label: &str) -> anyhow::Result<HashSet<u64>> {
     let set: HashSet<u64> = raw
         .iter()
+        .flat_map(|s| s.split(','))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
         .filter_map(|s| match s.parse() {
             Ok(id) => Some(id),
             Err(_) => {
