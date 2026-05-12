@@ -23,6 +23,17 @@ enabled = true
 remove_after_reply = false
 EOF
 
+if [ -n "$GATEWAY_WS_URL" ]; then
+    cat >> "$CONFIG" << EOF
+
+[gateway]
+url = "${GATEWAY_WS_URL}"
+platform = "${GATEWAY_PLATFORM:-telegram}"
+token = "${GATEWAY_WS_TOKEN}"
+bot_username = "${TELEGRAM_BOT_USERNAME}"
+EOF
+fi
+
 if [ -n "$GROQ_API_KEY" ]; then
     cat >> "$CONFIG" << EOF
 
