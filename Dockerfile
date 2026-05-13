@@ -1,9 +1,18 @@
 # --- Build stage ---
 FROM rust:1-bookworm AS builder
+
+# Build openab
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
 COPY src/ src/
+RUN touch src/main.rs && cargo build --release
+
+# Build openab-gateway
+WORKDIR /build/gateway
+COPY gateway/Cargo.toml gateway/Cargo.lock ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
+COPY gateway/src/ src/
 RUN touch src/main.rs && cargo build --release
 
 # --- Runtime stage ---
@@ -37,6 +46,7 @@ ENV HOME=/home/agent
 WORKDIR /home/agent
 
 COPY --from=builder --chown=agent:agent /build/target/release/openab /usr/local/bin/openab
+COPY --from=builder --chown=agent:agent /build/gateway/target/release/openab-gateway /usr/local/bin/openab-gateway
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

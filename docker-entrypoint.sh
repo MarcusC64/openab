@@ -4,6 +4,17 @@ set -e
 CONFIG=/etc/openab/config.toml
 mkdir -p /etc/openab
 
+# Start embedded gateway if Telegram is configured
+if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+    GATEWAY_LISTEN=0.0.0.0:8080 \
+    TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+    TELEGRAM_SECRET_TOKEN="$TELEGRAM_SECRET_TOKEN" \
+    GATEWAY_WS_TOKEN="$GATEWAY_WS_TOKEN" \
+    openab-gateway &
+
+    GATEWAY_WS_URL="ws://127.0.0.1:8080/ws"
+fi
+
 cat > "$CONFIG" << EOF
 [discord]
 bot_token = "${DISCORD_BOT_TOKEN}"
