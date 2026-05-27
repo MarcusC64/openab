@@ -18,7 +18,17 @@ fi
 cat > "$CONFIG" << EOF
 [discord]
 bot_token = "${DISCORD_BOT_TOKEN}"
+EOF
+
+# Only set allowed_channels if DISCORD_CHANNEL_ID is non-empty
+# (empty = allow all channels; [""] would cause a parse error)
+if [ -n "$DISCORD_CHANNEL_ID" ]; then
+    cat >> "$CONFIG" << EOF
 allowed_channels = ["${DISCORD_CHANNEL_ID}"]
+EOF
+fi
+
+cat >> "$CONFIG" << EOF
 
 [agent]
 command = "kiro-cli"
