@@ -140,13 +140,20 @@ helm install openab-copilot openab/openab \
 
 ## Model Selection
 
-Copilot CLI defaults to Claude Sonnet 4.6. Other available models include:
+The default model is defined in `~/.copilot/settings.json`.
 
-- Claude Opus 4.6, Claude Haiku 4.5 (Anthropic)
-- GPT-5.3-Codex (OpenAI)
-- Gemini 3 Pro (Google)
+To set `auto` as the default model, exec into the container and create the file:
 
-Model selection is controlled by Copilot CLI itself (via `/model` in interactive mode). In ACP mode, the default model is used.
+```bash
+kubectl exec -it deployment/openab-copilot-copilot -- bash -c '
+cat << EOF > ~/.copilot/settings.json
+{
+  "model": "auto"
+}
+EOF'
+```
+
+The `auto` setting lets Copilot automatically select the best model for each request. This persists across pod restarts when `persistence.enabled=true` (the home directory is on a PVC).
 
 ## Known Limitations
 

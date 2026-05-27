@@ -13,11 +13,13 @@ on:
         type: choice
         options:
           - default
+          - antigravity
           - claude
           - codex
           - copilot
           - cursor
           - gemini
+          - hermes
           - opencode
         default: 'default'
 

@@ -44,6 +44,17 @@ data:
     {{- if $cfg.discord.trustedBotIds }}
     trusted_bot_ids = {{ $cfg.discord.trustedBotIds | toJson }}
     {{- end }}
+    {{- range $cfg.discord.allowedRoleIds }}
+    {{- if regexMatch "e\\+|E\\+" (toString .) }}
+    {{- fail (printf "discord.allowedRoleIds contains a mangled ID: %s — use --set-string instead of --set for role IDs" (toString .)) }}
+    {{- end }}
+    {{- if not (regexMatch "^[0-9]{17,20}$" (toString .)) }}
+    {{- fail (printf "discord.allowedRoleIds contains an invalid role ID: %s — must be a 17-20 digit snowflake ID" (toString .)) }}
+    {{- end }}
+    {{- end }}
+    {{- if $cfg.discord.allowedRoleIds }}
+    allowed_role_ids = {{ $cfg.discord.allowedRoleIds | toJson }}
+    {{- end }}
     {{- /* allowUserMessages: controls whether the bot requires @mention in threads (Discord) */ -}}
     {{- if $cfg.discord.allowUserMessages }}
     {{- if not (has $cfg.discord.allowUserMessages (list "involved" "mentions" "multibot-mentions")) }}
@@ -167,6 +178,9 @@ data:
     api_key = "${STT_API_KEY}"
     model = {{ ($cfg.stt).model | default "whisper-large-v3-turbo" | toJson }}
     base_url = {{ ($cfg.stt).baseUrl | default "https://api.groq.com/openai/v1" | toJson }}
+    {{- if hasKey ($cfg.stt | default dict) "echoTranscript" }}
+    echo_transcript = {{ ($cfg.stt).echoTranscript }}
+    {{- end }}
     {{- end }}
     {{- if ($cfg.gateway).enabled }}
     {{- if not ($cfg.gateway).url }}

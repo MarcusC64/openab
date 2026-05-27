@@ -11,7 +11,12 @@ use std::collections::HashMap;
 /// A human message resets both soft and hard counters to 0, allowing bots to
 /// resume. This is *not* a lifetime total — it guards against runaway loops
 /// between human resets.
-pub const HARD_BOT_TURN_LIMIT: u32 = 100;
+pub const HARD_BOT_TURN_LIMIT: u32 = 1000;
+
+/// Stable prefix used in all bot turn limit warning messages.
+/// Referenced by the dedup check in the Discord adapter — changing this
+/// string requires updating the dedup check too.
+pub const BOT_TURN_LIMIT_WARNING_PREFIX: &str = "⚠️ Bot turn limit reached";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TurnResult {
@@ -34,7 +39,10 @@ pub struct BotTurnTracker {
 
 impl BotTurnTracker {
     pub fn new(soft_limit: u32) -> Self {
-        Self { soft_limit, counts: HashMap::new() }
+        Self {
+            soft_limit,
+            counts: HashMap::new(),
+        }
     }
 
     pub fn on_bot_message(&mut self, thread_id: &str) -> TurnResult {
@@ -72,8 +80,9 @@ impl BotTurnTracker {
                 severity: TurnSeverity::Soft,
                 turns: n,
                 user_message: format!(
-                    "⚠️ Bot turn limit reached ({n}/{soft}). \
+                    "{} ({n}/{soft}). \
                      A human must reply in this thread to continue bot-to-bot conversation.",
+                    BOT_TURN_LIMIT_WARNING_PREFIX,
                     soft = self.soft_limit,
                 ),
             },
@@ -156,6 +165,14 @@ mod tests {
             assert_eq!(t.on_bot_message("t1"), TurnResult::Ok);
         }
         assert_eq!(t.on_bot_message("t1"), TurnResult::HardLimit);
+    }
+
+    #[test]
+    fn hard_limit_does_not_fire_at_legacy_100() {
+        let mut t = BotTurnTracker::new(HARD_BOT_TURN_LIMIT + 1);
+        for i in 1..=100 {
+            assert_eq!(t.on_bot_message("t1"), TurnResult::Ok, "turn {i}");
+        }
     }
 
     #[test]
@@ -265,9 +282,11 @@ mod tests {
             TurnAction::WarnAndStop {
                 severity: TurnSeverity::Soft,
                 turns: 3,
-                user_message: "⚠️ Bot turn limit reached (3/3). \
-                               A human must reply in this thread to continue bot-to-bot conversation."
-                    .to_string(),
+                user_message: format!(
+                    "{} (3/3). \
+                     A human must reply in this thread to continue bot-to-bot conversation.",
+                    BOT_TURN_LIMIT_WARNING_PREFIX,
+                ),
             },
         );
     }
@@ -307,12 +326,18 @@ mod tests {
         assert_eq!(t.classify_bot_message("t1"), TurnAction::Continue);
         assert!(matches!(
             t.classify_bot_message("t1"),
-            TurnAction::WarnAndStop { severity: TurnSeverity::Soft, .. },
+            TurnAction::WarnAndStop {
+                severity: TurnSeverity::Soft,
+                ..
+            },
         ));
         assert_eq!(t.classify_bot_message("t2"), TurnAction::Continue);
         assert!(matches!(
             t.classify_bot_message("t2"),
-            TurnAction::WarnAndStop { severity: TurnSeverity::Soft, .. },
+            TurnAction::WarnAndStop {
+                severity: TurnSeverity::Soft,
+                ..
+            },
         ));
     }
 
@@ -333,7 +358,11 @@ mod tests {
         assert_eq!(t.classify_bot_message("t1"), TurnAction::Continue);
         assert!(matches!(
             t.classify_bot_message("t1"),
-            TurnAction::WarnAndStop { severity: TurnSeverity::Soft, turns: 2, .. },
+            TurnAction::WarnAndStop {
+                severity: TurnSeverity::Soft,
+                turns: 2,
+                ..
+            },
         ));
     }
 }

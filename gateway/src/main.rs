@@ -1,5 +1,7 @@
 mod adapters;
+mod media;
 mod schema;
+pub mod store;
 
 use anyhow::Result;
 use axum::{
@@ -50,6 +52,7 @@ pub struct AppState {
     pub feishu: Option<adapters::feishu::FeishuAdapter>,
     /// Google Chat adapter (None if Google Chat disabled)
     pub google_chat: Option<adapters::googlechat::GoogleChatAdapter>,
+    pub wecom: Option<adapters::wecom::WecomAdapter>,
     /// WebSocket authentication token
     pub ws_token: Option<String>,
     /// Broadcast channel: gateway → OAB (events from all platforms)
@@ -59,6 +62,8 @@ pub struct AppState {
     /// the first client to `remove()` a token wins the free Reply API call;
     /// other clients for the same event naturally fall back to Push API.
     pub reply_token_cache: ReplyTokenCache,
+    /// Shared HTTP client for media downloads and API calls
+    pub client: reqwest::Client,
 }
 
 // --- WebSocket handler (OAB connects here) ---
@@ -108,7 +113,7 @@ async fn handle_oab_connection(state: Arc<AppState>, socket: axum::extract::ws::
         let client = reqwest::Client::new();
         while let Some(Ok(msg)) = ws_rx.next().await {
             if let Message::Text(text) = msg {
-                match serde_json::from_str::<GatewayReply>(&*text) {
+                match serde_json::from_str::<GatewayReply>(&text) {
                     Ok(reply) => {
                         info!(
                             platform = %reply.platform,
@@ -169,6 +174,13 @@ async fn handle_oab_connection(state: Arc<AppState>, socket: axum::extract::ws::
                                     gc.handle_reply(&reply, &state_for_recv.event_tx).await;
                                 } else {
                                     warn!("reply for googlechat but adapter not configured");
+                                }
+                            }
+                            "wecom" => {
+                                if let Some(ref wecom) = state_for_recv.wecom {
+                                    wecom.handle_reply(&reply, &state_for_recv.event_tx).await;
+                                } else {
+                                    warn!("reply for wecom but adapter not configured");
                                 }
                             }
                             other => warn!(platform = other, "unknown reply platform"),
@@ -314,14 +326,32 @@ async fn main() -> Result<()> {
         None
     };
 
+    // WeCom adapter
+    let wecom = adapters::wecom::WecomConfig::from_env().map(|config| {
+        let path = config.webhook_path.clone();
+        info!(path = %path, "wecom adapter enabled");
+        adapters::wecom::WecomAdapter::new(config)
+    });
+    if let Some(ref w) = wecom {
+        app = app
+            .route(&w.config.webhook_path, axum::routing::get(adapters::wecom::verify))
+            .route(&w.config.webhook_path, post(adapters::wecom::webhook));
+    }
+
     if telegram_bot_token.is_none()
         && line_access_token.is_none()
         && teams.is_none()
         && feishu.is_none()
         && google_chat.is_none()
+        && wecom.is_none()
     {
-        warn!("no adapters configured — set TELEGRAM_BOT_TOKEN, LINE_CHANNEL_ACCESS_TOKEN, TEAMS_APP_ID + TEAMS_APP_SECRET, FEISHU_APP_ID + FEISHU_APP_SECRET, and/or GOOGLE_CHAT_ENABLED=true");
+        warn!("no adapters configured — set TELEGRAM_BOT_TOKEN, LINE_CHANNEL_ACCESS_TOKEN, TEAMS_APP_ID + TEAMS_APP_SECRET, FEISHU_APP_ID + FEISHU_APP_SECRET, GOOGLE_CHAT_ENABLED=true, and/or WECOM_CORP_ID + WECOM_SECRET + WECOM_TOKEN + WECOM_ENCODING_AES_KEY + WECOM_AGENT_ID");
     }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("HTTP client must build");
 
     let state = Arc::new(AppState {
         telegram_bot_token,
@@ -332,9 +362,11 @@ async fn main() -> Result<()> {
         teams_service_urls: Mutex::new(HashMap::new()),
         feishu,
         google_chat,
+        wecom,
         ws_token,
         event_tx,
         reply_token_cache,
+        client,
     });
 
     // Background task: sweep expired reply tokens every REPLY_TOKEN_TTL_SECS
@@ -384,6 +416,9 @@ async fn main() -> Result<()> {
 
     let app = app.with_state(state.clone());
 
+    // Background task: evict expired media files (colocate store, TTL 2 min)
+    tokio::spawn(store::eviction_loop());
+
     // Spawn feishu WebSocket long-connection if configured
     // feishu_shutdown_tx must remain alive for the lifetime of main() — dropping
     // it signals shutdown to the WS task via feishu_shutdown_rx.
@@ -427,6 +462,7 @@ mod tests {
             },
             command: None,
             request_id: None,
+            quote_message_id: None,
         }
     }
 

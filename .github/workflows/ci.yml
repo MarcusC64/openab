@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - "src/**"
+      - "gateway/**"
+      - "operator/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "Dockerfile*"
@@ -12,22 +14,84 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.filter.outputs.core }}
+      gateway: ${{ steps.filter.outputs.gateway }}
+      operator: ${{ steps.filter.outputs.operator }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: filter
+        run: |
+          BASE=${{ github.event.pull_request.base.sha }}
+          HEAD=${{ github.event.pull_request.head.sha }}
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          echo "core=$(echo "$CHANGED" | grep -qE '^(src/|Cargo\.(toml|lock))' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "gateway=$(echo "$CHANGED" | grep -q '^gateway/' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "operator=$(echo "$CHANGED" | grep -q '^operator/' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
   check:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-
       - uses: Swatinem/rust-cache@v2
-
       - name: cargo check
         run: cargo check
-
       - name: cargo clippy
         run: cargo clippy -- -D warnings
-
       - name: cargo test
         run: cargo test
+
+  gateway:
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gateway
+      - name: cargo check
+        run: cargo check
+      - name: cargo clippy
+        run: cargo clippy -- -D warnings
+      - name: cargo test
+        run: cargo test
+
+  operator:
+    needs: changes
+    if: needs.changes.outputs.operator == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: operator
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: operator
+      - name: cargo check
+        run: cargo check
+      - name: cargo clippy
+        run: cargo clippy -- -D warnings
+      - name: cargo test
+        run: cargo test
+      - name: cargo build
+        run: cargo build --release

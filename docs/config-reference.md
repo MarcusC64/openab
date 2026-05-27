@@ -41,6 +41,9 @@ Discord adapter. Requires a Discord bot token.
 | `allow_user_messages` | string | `"involved"` | `"involved"` — reply in threads bot has participated in without @mention; channel messages require @mention; DMs always process. `"mentions"` — always require @mention. `"multibot-mentions"` — like `"involved"`, but require @mention once another bot has posted in the thread. |
 | `allow_dm` | bool | `false` | `true` = respond to Discord DMs; `false` = ignore DMs. `allowed_users` still applies in DMs. Each DM user consumes one session slot. |
 | `max_bot_turns` | u32 | `100` | Max consecutive bot turns per thread before throttling (soft limit). Human message resets the counter. A compiled-in hard cap of 1000 consecutive bot messages is always enforced. |
+| `message_processing_mode` | string | `"per-message"` | Message dispatch mode: `"per-message"` (each message = own turn), `"per-thread"` (all messages in thread share one buffer), or `"per-lane"` (each sender gets own buffer). See [Message Dispatch Modes](message-dispatch-modes.md). |
+| `max_buffered_messages` | u32 | `10` | Per-thread/lane mpsc channel capacity. Only applies to `per-thread` / `per-lane` modes. |
+| `max_batch_tokens` | u32 | `24000` | Soft token cap per ACP turn. Only applies to `per-thread` / `per-lane` modes. |
 
 ---
 
@@ -57,9 +60,12 @@ Slack adapter using Socket Mode. Requires both a Bot User OAuth Token and an App
 | `allow_all_users` | bool \| omit | auto-detect | Same behavior as Discord. |
 | `allowed_users` | string[] | `[]` | Slack user IDs (e.g. `U0123456789`). |
 | `allow_bot_messages` | string | `"off"` | Same as Discord. |
-| `trusted_bot_ids` | string[] | `[]` | Slack Bot User IDs (`U...`). Find via: click bot profile → Copy member ID. |
+| `trusted_bot_ids` | string[] | `[]` | Slack Bot User IDs (`U...`) or Bot IDs (`B...`). `U...` matching resolves event Bot IDs via Slack `bots.info`, so the bot token needs `users:read`. |
 | `allow_user_messages` | string | `"involved"` | Same as Discord. |
 | `max_bot_turns` | u32 | `100` | Same as Discord. |
+| `message_processing_mode` | string | `"per-message"` | Same as Discord. See [Message Dispatch Modes](message-dispatch-modes.md). |
+| `max_buffered_messages` | u32 | `10` | Same as Discord. |
+| `max_batch_tokens` | u32 | `24000` | Same as Discord. |
 
 ---
 
@@ -77,6 +83,9 @@ Custom Gateway adapter for platforms like Telegram, LINE, Feishu/Lark, and Googl
 | `allowed_channels` | string[] | `[]` | Chat/group IDs to allow. Only checked when `allow_all_channels` resolves to false. |
 | `allow_all_users` | bool \| omit | auto-detect | `true` = any user; `false` = only `allowed_users`. Omitted = inferred from list. |
 | `allowed_users` | string[] | `[]` | User IDs to allow. Only checked when `allow_all_users` resolves to false. |
+| `message_processing_mode` | string | `"per-message"` | Same as Discord. See [Message Dispatch Modes](message-dispatch-modes.md). |
+| `max_buffered_messages` | u32 | `10` | Same as Discord. |
+| `max_batch_tokens` | u32 | `24000` | Same as Discord. |
 
 ---
 
@@ -86,10 +95,10 @@ The AI agent subprocess that OpenAB spawns to handle messages via ACP.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `command` | string | *required* | Agent binary (e.g. `kiro-cli`, `claude`, `codex`, `gemini`, `copilot`, `opencode`, `cursor-agent`). |
+| `command` | string | *required* | Agent binary (e.g. `kiro-cli`, `claude-agent-acp`, `codex`, `gemini`, `copilot`, `opencode`, `pi-acp`, `cursor-agent`). |
 | `args` | string[] | `[]` | CLI arguments passed to the agent. |
 | `working_dir` | string | `"/tmp"` | Working directory for the agent process. |
-| `env` | map | `{}` | Extra environment variables (e.g. `{ ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}" }`). |
+| `env` | map | `{}` | Extra environment variables (e.g. `{ OPENAI_API_KEY = "${OPENAI_API_KEY}" }`). |
 | `inherit_env` | string[] | `[]` | Env var names to inherit from the OAB process (e.g. vars injected via K8s `envFrom`). Keys in `env` take precedence. |
 
 > **Default inherited vars:** After `env_clear()`, the agent always receives `HOME`, `PATH`, and `USER` (on Windows: `USERPROFILE`, `USERNAME`, `PATH`, `SystemRoot`, `SystemDrive`). Use `inherit_env` to pass additional vars beyond this baseline.
@@ -105,10 +114,11 @@ working_dir = "/home/agent"
 
 # Claude Code
 [agent]
-command = "claude"
-args = ["--acp"]
+command = "claude-agent-acp"
+args = []
 working_dir = "/home/node"
-env = { ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}" }
+# Auth: kubectl exec -it deploy/openab-claude -- claude auth login
+# Credentials persist in HOME PVC across restarts. See docs/claude-code.md.
 
 # Codex
 [agent]
@@ -136,10 +146,20 @@ command = "opencode"
 args = ["acp"]
 working_dir = "/home/node"
 
+# Pi Agent
+[agent]
+command = "pi-acp"
+working_dir = "/home/node"
+
 # Cursor Agent
 [agent]
 command = "cursor-agent"
 args = ["acp", "--model", "auto", "--workspace", "/home/agent"]
+working_dir = "/home/agent"
+
+# Hermes Agent
+[agent]
+command = "hermes-acp"
 working_dir = "/home/agent"
 ```
 
@@ -204,6 +224,7 @@ Speech-to-text transcription for voice messages. Uses an OpenAI-compatible `/aud
 | `api_key` | string | `""` | API key for the STT service. When empty and `base_url` contains `groq.com`, the `GROQ_API_KEY` environment variable is used automatically. For local servers, use `api_key = "not-needed"`. |
 | `model` | string | `"whisper-large-v3-turbo"` | Model name to use for transcription. |
 | `base_url` | string | `"https://api.groq.com/openai/v1"` | Base URL of the STT API. Any OpenAI-compatible `/audio/transcriptions` endpoint works. |
+| `echo_transcript` | bool | `false` | When set to `true` and STT runs, post a `> 🎤 <transcript>` message to the thread before the agent reply so users can verify what was heard. Failures show `(transcription failed)` and add a ⚠️ reaction to the original message. |
 
 ---
 
@@ -255,6 +276,33 @@ timezone = "UTC"
 | `thread_id` | string | `""` | Optional thread ID to post into an existing thread. |
 
 The external `cronjob.toml` uses `[[jobs]]` (same fields). See [Usercron docs](cronjob.md#usercron--hot-reload-with-cronjobtoml) for details.
+
+### Usercron-only `[[jobs]]` fields
+
+These fields are valid only in the external usercron file, for example `$HOME/.openab/cronjob.toml`. They are rejected in baseline `[[cron.jobs]]` because OpenAB only writes state back to the user-managed cron file.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `id` | string | *required with `disable_on_success`* | Stable job ID used when the scheduler writes `enabled = false` or `thread_id` back to `cronjob.toml`. |
+| `disable_on_success` | string | — | Command to run before sending the scheduled prompt. |
+| `disable_on_success_match` | string | *required with `disable_on_success`* | Marker that must appear in stdout or stderr, in addition to exit code `0`, before the job is considered complete. |
+| `disable_on_success_timeout_secs` | integer | `60` | Timeout for the completion check command. |
+| `disable_on_success_working_dir` | string | — | Working directory for the completion check command. |
+
+Example:
+
+```toml
+[[jobs]]
+id = "fix-unit-tests"
+enabled = true
+schedule = "*/10 * * * *"
+channel = "123456789"
+message = "Unit tests are still failing. Continue fixing them."
+disable_on_success = "npm test && echo OPENAB_GOAL_SUCCESS"
+disable_on_success_match = "OPENAB_GOAL_SUCCESS"
+disable_on_success_timeout_secs = 120
+disable_on_success_working_dir = "/workspace/my-project"
+```
 
 **Cron expression format:**
 
@@ -308,6 +356,9 @@ Key mapping (`values.yaml` → `config.toml`):
 | `agents.<name>.discord.allowBotMessages` | `[discord] allow_bot_messages` |
 | `agents.<name>.discord.trustedBotIds` | `[discord] trusted_bot_ids` |
 | `agents.<name>.discord.allowUserMessages` | `[discord] allow_user_messages` |
+| `agents.<name>.discord.messageProcessingMode` | `[discord] message_processing_mode` |
+| `agents.<name>.discord.maxBufferedMessages` | `[discord] max_buffered_messages` |
+| `agents.<name>.discord.maxBatchTokens` | `[discord] max_batch_tokens` |
 | `agents.<name>.slack.*` | `[slack] *` (same pattern) |
 | `agents.<name>.pool.maxSessions` | `[pool] max_sessions` |
 | `agents.<name>.pool.sessionTtlHours` | `[pool] session_ttl_hours` |

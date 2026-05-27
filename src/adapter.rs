@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::acp::{classify_notification, AcpEvent, ContentBlock, SessionPool};
 use crate::config::{ReactionsConfig, ToolDisplay};
@@ -10,6 +10,91 @@ use crate::error_display::{format_coded_error, format_user_error};
 use crate::format;
 use crate::markdown::{self, TableMode};
 use crate::reactions::StatusReactionController;
+
+// --- Output directive parsing ---
+
+/// Parsed directives from agent output header block.
+/// Consecutive `[[key:value]]` lines at the start of output are directives.
+#[derive(Default, Debug)]
+pub struct OutputDirectives {
+    /// Message ID to reply to (Discord: message_reference)
+    pub reply_to: Option<String>,
+}
+
+/// Parse `[[key:value]]` directives from the beginning of agent output.
+/// Returns parsed directives and the remaining content (directives stripped).
+pub fn parse_output_directives(content: &str) -> (OutputDirectives, String) {
+    let mut directives = OutputDirectives::default();
+    let mut content_start = 0;
+    let mut trailing_content: Option<&str> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Try to match [[key:value]] at the start of the line (lenient: allows trailing content)
+        if let Some(after_open) = trimmed.strip_prefix("[[") {
+            if let Some(close_pos) = after_open.find("]]") {
+                let inner = &after_open[..close_pos];
+                if let Some((key, value)) = inner.split_once(':') {
+                    match key.trim() {
+                        "reply_to" => {
+                            let v = value.trim();
+                            // Validate: non-empty, reasonable length, no whitespace/control chars
+                            if !v.is_empty() && v.len() <= 64 && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_') {
+                                directives.reply_to = Some(v.to_string());
+                            }
+                        }
+                        _ => {
+                            tracing::debug!(key = key.trim(), "unknown output directive ignored");
+                        }
+                    }
+                    // Check for trailing content after ]]
+                    let remainder = after_open[close_pos + 2..].trim();
+                    if !remainder.is_empty() {
+                        trailing_content = Some(remainder);
+                        // Advance past this line
+                        content_start += line.len();
+                        if content.as_bytes().get(content_start) == Some(&b'\r') {
+                            content_start += 1;
+                        }
+                        if content.as_bytes().get(content_start) == Some(&b'\n') {
+                            content_start += 1;
+                        }
+                        break; // Trailing content ends directive header
+                    }
+                    // Advance past this line + its line ending (handles both \n and \r\n)
+                    content_start += line.len();
+                    if content.as_bytes().get(content_start) == Some(&b'\r') {
+                        content_start += 1;
+                    }
+                    if content.as_bytes().get(content_start) == Some(&b'\n') {
+                        content_start += 1;
+                    }
+                } else {
+                    // [[X]] without colon — not a directive, stop parsing
+                    break;
+                }
+            } else {
+                // No closing ]] found — not a directive, stop parsing
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    let remaining = if let Some(trailing) = trailing_content {
+        if content_start < content.len() {
+            format!("{}\n{}", trailing, &content[content_start..])
+        } else {
+            trailing.to_string()
+        }
+    } else if content_start < content.len() {
+        content[content_start..].to_string()
+    } else {
+        String::new()
+    };
+    (directives, remaining)
+}
 
 // --- Platform-agnostic types ---
 
@@ -106,6 +191,14 @@ pub struct SenderContext {
     /// breakage). If future additions require breaking changes, bump to v1.1+.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+    /// Platform message ID. Agents can use this to reply to a specific message
+    /// via the `[[reply_to:<message_id>]]` output directive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// The platform user ID of the receiving bot/agent.
+    /// Enables agents to identify themselves when multiple agents share the same backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receiver_id: Option<String>,
 }
 
 // --- ChatAdapter trait ---
@@ -141,6 +234,24 @@ pub trait ChatAdapter: Send + Sync + 'static {
         Err(anyhow::anyhow!("edit_message not supported"))
     }
 
+    /// Send a message as a reply to a specific message (Discord: message_reference).
+    /// Default: falls back to plain send_message (ignores reply_to).
+    async fn send_message_with_reply(
+        &self,
+        channel: &ChannelRef,
+        content: &str,
+        reply_to_message_id: &str,
+    ) -> Result<MessageRef> {
+        let _ = reply_to_message_id; // unused in default impl
+        self.send_message(channel, content).await
+    }
+
+    /// Delete a message. Used to remove streaming placeholders when reply_to is set.
+    /// Default: edits to zero-width space (fallback for platforms without delete support).
+    async fn delete_message(&self, msg: &MessageRef) -> Result<()> {
+        self.edit_message(msg, "\u{200b}").await
+    }
+
     /// Whether this adapter should use streaming edit (true) or send-once (false).
     /// `other_bot_present` indicates if another bot has posted in the current thread.
     /// Streaming should be disabled in multi-bot threads to avoid edit interference.
@@ -159,6 +270,9 @@ pub struct AdapterRouter {
     pool: Arc<SessionPool>,
     reactions_config: ReactionsConfig,
     table_mode: TableMode,
+    prompt_hard_timeout: std::time::Duration,
+    /// Polling cadence for the recv-loop liveness check (#732).
+    liveness_check_interval: std::time::Duration,
 }
 
 impl AdapterRouter {
@@ -166,11 +280,24 @@ impl AdapterRouter {
         pool: Arc<SessionPool>,
         reactions_config: ReactionsConfig,
         table_mode: TableMode,
+        prompt_hard_timeout_secs: u64,
+        liveness_check_secs: u64,
     ) -> Self {
+        if liveness_check_secs >= prompt_hard_timeout_secs {
+            warn!(
+                liveness_check_secs,
+                prompt_hard_timeout_secs,
+                "pool.liveness_check_secs >= pool.prompt_hard_timeout_secs; \
+                 the hard ceiling will only fire after the next liveness tick \
+                 and may be effectively bypassed. Lower liveness_check_secs."
+            );
+        }
         Self {
             pool,
             reactions_config,
             table_mode,
+            prompt_hard_timeout: std::time::Duration::from_secs(prompt_hard_timeout_secs),
+            liveness_check_interval: std::time::Duration::from_secs(liveness_check_secs),
         }
     }
 
@@ -306,7 +433,15 @@ impl AdapterRouter {
         reactions: Arc<StatusReactionController>,
         other_bot_present: bool,
     ) -> Result<()> {
-        self.stream_prompt_blocks(adapter, thread_key, content_blocks, thread_channel, reactions, other_bot_present).await
+        self.stream_prompt_blocks(
+            adapter,
+            thread_key,
+            content_blocks,
+            thread_channel,
+            reactions,
+            other_bot_present,
+        )
+        .await
     }
 
     /// Drive one ACP turn with the given pre-packed ContentBlocks.
@@ -327,6 +462,8 @@ impl AdapterRouter {
         let streaming = adapter.use_streaming(other_bot_present);
         let table_mode = self.table_mode;
         let tool_display = self.reactions_config.tool_display;
+        let prompt_hard_timeout = self.prompt_hard_timeout;
+        let liveness_check_interval = self.liveness_check_interval;
 
         self.pool
             .with_connection(thread_key, |conn| {
@@ -335,7 +472,7 @@ impl AdapterRouter {
                     let reset = conn.session_reset;
                     conn.session_reset = false;
 
-                    let (mut rx, _) = conn.session_prompt(content_blocks).await?;
+                    let (mut rx, request_id) = conn.session_prompt(content_blocks).await?;
                     reactions.set_thinking().await;
 
                     let mut text_buf = String::new();
@@ -388,22 +525,46 @@ impl AdapterRouter {
                         (None, None)
                     };
 
-                    // Process ACP notifications
+                    // (#732) Liveness-aware recv loop. Filters stale id-bearing
+                    // messages and abandons cleanly on dead agent / hard ceiling
+                    // so late responses cannot leak into the next prompt.
                     let mut response_error: Option<String> = None;
-                    let recv_timeout = std::time::Duration::from_secs(600);
+                    let prompt_start = tokio::time::Instant::now();
                     loop {
-                        let notification = match tokio::time::timeout(recv_timeout, rx.recv()).await
-                        {
-                            Ok(Some(n)) => n,
-                            Ok(None) => break, // channel closed
-                            Err(_) => {
-                                response_error = Some("Agent stopped responding".into());
-                                break;
+                        let notification = tokio::select! {
+                            msg = rx.recv() => match msg {
+                                Some(n) => n,
+                                // Reader saw EOF and already drained pending; nothing to abandon.
+                                None => break,
+                            },
+                            _ = tokio::time::sleep(liveness_check_interval) => {
+                                if !conn.alive() {
+                                    response_error = Some("Agent process died".into());
+                                    conn.abandon_request(request_id).await;
+                                    break;
+                                }
+                                if prompt_start.elapsed() > prompt_hard_timeout {
+                                    response_error = Some(format!(
+                                        "Agent exceeded hard timeout ({}s)",
+                                        prompt_hard_timeout.as_secs(),
+                                    ));
+                                    conn.abandon_request(request_id).await;
+                                    break;
+                                }
+                                continue;
                             }
                         };
-                        if notification.id.is_some() {
+                        if let Some(notification_id) = notification.id {
+                            if notification_id != request_id {
+                                // Stale response from a previously-abandoned prompt.
+                                // No automated test seam: this path only triggers when a
+                                // real subprocess emits a late response after the broker
+                                // already called abandon_request — covered by manual
+                                // repro against a live agent (see #732 PR description).
+                                continue;
+                            }
                             if let Some(ref err) = notification.error {
-                                response_error = Some(format_coded_error(err.code, &err.message));
+                                response_error = Some(format_coded_error(err.code, &err.message, err.data_message()));
                             }
                             break;
                         }
@@ -486,6 +647,12 @@ impl AdapterRouter {
                     // Stop the edit loop
                     drop(buf_tx);
 
+                    // Parse output directives from raw text_buf BEFORE compose_display.
+                    // Directives are agent meta-layer, not content — must be stripped
+                    // before tool lines are composed into the display output.
+                    let (directives, stripped_text) = parse_output_directives(&text_buf);
+                    let text_buf = stripped_text;
+
                     // Build final content
                     let final_content =
                         compose_display(&tool_lines, &text_buf, false, tool_display);
@@ -504,17 +671,61 @@ impl AdapterRouter {
                     let final_content = markdown::convert_tables(&final_content, table_mode);
                     let chunks = format::split_message(&final_content, message_limit);
                     if let Some(msg) = placeholder_msg {
-                        // Streaming: edit first chunk into placeholder, send rest as new messages
-                        if let Some(first) = chunks.first() {
-                            let _ = adapter.edit_message(&msg, first).await;
-                        }
-                        for chunk in chunks.iter().skip(1) {
-                            let _ = adapter.send_message(&thread_channel, chunk).await;
+                        if let Some(ref reply_id) = directives.reply_to {
+                            // reply_to directive: send reply first, then delete placeholder.
+                            // Only delete if send succeeds — preserves placeholder on failure.
+                            let mut send_ok = false;
+                            let mut first = true;
+                            for chunk in &chunks {
+                                if first {
+                                    match adapter.send_message_with_reply(
+                                        &thread_channel,
+                                        chunk,
+                                        reply_id,
+                                    ).await {
+                                        Ok(_) => { send_ok = true; }
+                                        Err(e) => {
+                                            tracing::warn!(error = ?e, "reply_to send failed; preserving placeholder");
+                                        }
+                                    }
+                                } else {
+                                    let _ = adapter.send_message(&thread_channel, chunk).await;
+                                }
+                                first = false;
+                            }
+                            if send_ok {
+                                if let Err(e) = adapter.delete_message(&msg).await {
+                                    tracing::warn!(error = ?e, "delete placeholder failed; placeholder will remain visible");
+                                }
+                            }
+                        } else {
+                            // Normal streaming: edit first chunk into placeholder, send rest
+                            if let Some(first) = chunks.first() {
+                                let _ = adapter.edit_message(&msg, first).await;
+                            }
+                            for chunk in chunks.iter().skip(1) {
+                                let _ = adapter.send_message(&thread_channel, chunk).await;
+                            }
                         }
                     } else {
                         // Send-once: all chunks as new messages
+                        // First chunk uses reply_to directive if present
+                        let mut first = true;
                         for chunk in &chunks {
-                            let _ = adapter.send_message(&thread_channel, chunk).await;
+                            if first {
+                                if let Some(ref reply_id) = directives.reply_to {
+                                    let _ = adapter.send_message_with_reply(
+                                        &thread_channel,
+                                        chunk,
+                                        reply_id,
+                                    ).await;
+                                } else {
+                                    let _ = adapter.send_message(&thread_channel, chunk).await;
+                                }
+                            } else {
+                                let _ = adapter.send_message(&thread_channel, chunk).await;
+                            }
+                            first = false;
                         }
                     }
 
@@ -827,5 +1038,161 @@ mod tests {
         )];
         let out = compose_display(&tools, "response text", false, ToolDisplay::None);
         assert_eq!(out, "response text");
+    }
+}
+
+#[cfg(test)]
+mod directive_tests {
+    use super::parse_output_directives;
+
+    #[test]
+    fn parse_reply_to_directive() {
+        let input = "[[reply_to:1502606076451885136]]\nHello world";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("1502606076451885136".to_string()));
+        assert_eq!(content, "Hello world");
+    }
+
+    #[test]
+    fn parse_no_directives() {
+        let input = "Just plain content\nwith multiple lines";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, None);
+        assert_eq!(content, input);
+    }
+
+    #[test]
+    fn parse_multiple_directives() {
+        let input = "[[reply_to:123456]]\n[[unknown_key:value]]\nContent here";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("123456".to_string()));
+        assert_eq!(content, "Content here");
+    }
+
+    #[test]
+    fn parse_invalid_reply_to_rejects_whitespace() {
+        let input = "[[reply_to:has spaces]]\nContent";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, None);
+        assert_eq!(content, "Content");
+    }
+
+    #[test]
+    fn parse_slack_ts_format_accepted() {
+        let input = "[[reply_to:1234567890.123456]]\nContent";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("1234567890.123456".to_string()));
+        assert_eq!(content, "Content");
+    }
+
+    #[test]
+    fn parse_empty_reply_to() {
+        let input = "[[reply_to:]]\nContent";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, None);
+        assert_eq!(content, "Content");
+    }
+
+    #[test]
+    fn parse_crlf_line_endings() {
+        let input = "[[reply_to:999]]\r\nContent with CRLF";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("999".to_string()));
+        assert_eq!(content, "Content with CRLF");
+    }
+
+    #[test]
+    fn parse_directive_only_no_content() {
+        let input = "[[reply_to:123]]";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("123".to_string()));
+        assert_eq!(content, "");
+    }
+
+    #[test]
+    fn parse_non_directive_line_stops_parsing() {
+        let input = "Normal first line\n[[reply_to:123]]\nMore content";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, None);
+        assert_eq!(content, input);
+    }
+
+    #[test]
+    fn parse_duplicate_reply_to_last_wins() {
+        let input = "[[reply_to:111]]\n[[reply_to:222]]\nContent";
+        let (directives, content) = parse_output_directives(input);
+        // Last value wins
+        assert_eq!(directives.reply_to, Some("222".to_string()));
+        assert_eq!(content, "Content");
+    }
+
+    #[test]
+    fn parse_crlf_multiple_directives() {
+        let input = "[[reply_to:456]]\r\n[[unknown:x]]\r\nContent after CRLF";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("456".to_string()));
+        assert_eq!(content, "Content after CRLF");
+    }
+
+    #[test]
+    fn parse_bracket_without_colon_preserved() {
+        // [[Note]] has no colon — not a directive, preserved as content
+        let input = "[[Summary]]\nThis is body text";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, None);
+        assert_eq!(content, input);
+    }
+
+    #[test]
+    fn parse_reply_to_with_inline_content() {
+        // Agent puts content on same line as directive — should still parse
+        let input = "[[reply_to:1502724086474870926]]  @BOT I'm on standby";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("1502724086474870926".to_string()));
+        assert_eq!(content, "@BOT I'm on standby");
+    }
+
+    #[test]
+    fn parse_reply_to_inline_with_more_lines() {
+        let input = "[[reply_to:123]]  First line\nSecond line\nThird line";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("123".to_string()));
+        assert_eq!(content, "First line\nSecond line\nThird line");
+    }
+
+    #[test]
+    fn parse_reply_to_no_space_before_content() {
+        // No space between ]] and content
+        let input = "[[reply_to:1502724086474870926]]收到";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("1502724086474870926".to_string()));
+        assert_eq!(content, "收到");
+    }
+
+    #[test]
+    fn parse_reply_to_inline_with_mention() {
+        // Real-world case: directive followed by Discord mention
+        let input = "[[reply_to:1502724086474870926]]  <@1490365068863606784> 我 standby";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("1502724086474870926".to_string()));
+        assert_eq!(content, "<@1490365068863606784> 我 standby");
+    }
+
+    #[test]
+    fn parse_reply_to_inline_only_spaces() {
+        // Trailing spaces only — no real content, should be empty
+        let input = "[[reply_to:123]]   ";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("123".to_string()));
+        assert_eq!(content, "");
+    }
+
+    #[test]
+    fn parse_reply_to_with_brackets_in_content() {
+        // Content after ]] contains brackets — should not confuse parser
+        let input = "[[reply_to:456]]  看看 [[這個]] 怎麼樣";
+        let (directives, content) = parse_output_directives(input);
+        assert_eq!(directives.reply_to, Some("456".to_string()));
+        assert_eq!(content, "看看 [[這個]] 怎麼樣");
     }
 }

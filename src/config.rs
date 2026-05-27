@@ -57,7 +57,10 @@ impl<'de> Deserialize<'de> for AllowBots {
             "off" | "none" | "false" => Ok(Self::Off),
             "mentions" => Ok(Self::Mentions),
             "all" | "true" => Ok(Self::All),
-            other => Err(serde::de::Error::unknown_variant(other, &["off", "mentions", "all"])),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["off", "mentions", "all"],
+            )),
         }
     }
 }
@@ -102,6 +105,10 @@ pub struct SttConfig {
     pub model: String,
     #[serde(default = "default_stt_base_url")]
     pub base_url: String,
+    /// Echo the transcribed text back to the thread (no mentions) before
+    /// dispatching the prompt to the agent. Lets users verify STT accuracy.
+    #[serde(default = "default_echo_transcript")]
+    pub echo_transcript: bool,
 }
 
 impl Default for SttConfig {
@@ -111,12 +118,20 @@ impl Default for SttConfig {
             api_key: String::new(),
             model: default_stt_model(),
             base_url: default_stt_base_url(),
+            echo_transcript: default_echo_transcript(),
         }
     }
 }
 
-fn default_stt_model() -> String { "whisper-large-v3-turbo".into() }
-fn default_stt_base_url() -> String { "https://api.groq.com/openai/v1".into() }
+fn default_stt_model() -> String {
+    "whisper-large-v3-turbo".into()
+}
+fn default_stt_base_url() -> String {
+    "https://api.groq.com/openai/v1".into()
+}
+fn default_echo_transcript() -> bool {
+    false
+}
 
 #[derive(Debug, Deserialize)]
 pub struct DiscordConfig {
@@ -146,6 +161,11 @@ pub struct DiscordConfig {
     /// Human message resets the counter. Default: 100.
     #[serde(default = "default_max_bot_turns")]
     pub max_bot_turns: u32,
+    /// Role IDs that trigger the bot (same as direct @mention).
+    /// When a message mentions a role in this list, it is treated as a bot trigger.
+    /// Empty (default) = role mentions do not trigger the bot.
+    #[serde(default)]
+    pub allowed_role_ids: Vec<String>,
     /// Allow the bot to respond to Discord direct messages (DMs).
     /// Default: false (opt-in). `allowed_users` still applies in DMs.
     #[serde(default)]
@@ -161,9 +181,15 @@ pub struct DiscordConfig {
     pub max_batch_tokens: usize,
 }
 
-fn default_max_bot_turns() -> u32 { 100 }
-fn default_max_buffered_messages() -> usize { 10 }
-fn default_max_batch_tokens() -> usize { 24_000 }
+fn default_max_bot_turns() -> u32 {
+    100
+}
+fn default_max_buffered_messages() -> usize {
+    10
+}
+fn default_max_batch_tokens() -> usize {
+    24_000
+}
 
 /// Controls whether the bot responds to user messages in threads without @mention.
 ///
@@ -188,7 +214,10 @@ impl<'de> Deserialize<'de> for AllowUsers {
             "involved" => Ok(Self::Involved),
             "mentions" => Ok(Self::Mentions),
             "multibot_mentions" => Ok(Self::MultibotMentions),
-            other => Err(serde::de::Error::unknown_variant(other, &["involved", "mentions", "multibot-mentions"])),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["involved", "mentions", "multibot-mentions"],
+            )),
         }
     }
 }
@@ -289,10 +318,26 @@ pub struct PoolConfig {
     pub max_sessions: usize,
     #[serde(default = "default_ttl_hours")]
     pub session_ttl_hours: u64,
+    /// Hard ceiling for a single prompt (#732). Once exceeded, the broker
+    /// abandons the in-flight request, sends `session/cancel` to the agent,
+    /// and clears the pending entry so late responses cannot leak into the
+    /// next prompt's subscriber.
+    ///
+    /// Precision: checked every `liveness_check_secs`, so actual cutoff is
+    /// ±`liveness_check_secs` from this value.
+    #[serde(default = "default_prompt_hard_timeout_secs")]
+    pub prompt_hard_timeout_secs: u64,
+    /// Polling cadence (seconds) for the recv-loop liveness check (#732).
+    /// Lower = faster reaction to a dead agent / hard ceiling at the cost of
+    /// more wakeups while the agent is streaming normally.
+    #[serde(default = "default_liveness_check_secs")]
+    pub liveness_check_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CronJobConfig {
+    /// Stable ID for usercron jobs that need scheduler writeback.
+    pub id: Option<String>,
     /// Whether this cronjob is active (default: true)
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -313,11 +358,31 @@ pub struct CronJobConfig {
     /// Timezone (default: "UTC")
     #[serde(default = "default_cron_timezone")]
     pub timezone: String,
+    /// Usercron-only: command to run before firing. Exit 0 plus a matching
+    /// `disable_on_success_match` means the goal is complete and the scheduler
+    /// disables the job in the usercron file.
+    pub disable_on_success: Option<String>,
+    /// Usercron-only: required output marker for `disable_on_success`.
+    pub disable_on_success_match: Option<String>,
+    /// Usercron-only: timeout for `disable_on_success`.
+    #[serde(default = "default_disable_on_success_timeout_secs")]
+    pub disable_on_success_timeout_secs: u64,
+    /// Usercron-only: working directory for `disable_on_success`.
+    pub disable_on_success_working_dir: Option<String>,
 }
 
-fn default_cron_platform() -> String { "discord".into() }
-fn default_cron_sender() -> String { "openab-cron".into() }
-fn default_cron_timezone() -> String { "UTC".into() }
+fn default_cron_platform() -> String {
+    "discord".into()
+}
+fn default_cron_sender() -> String {
+    "openab-cron".into()
+}
+fn default_cron_timezone() -> String {
+    "UTC".into()
+}
+fn default_disable_on_success_timeout_secs() -> u64 {
+    60
+}
 
 /// Controls how tool calls are rendered in chat messages.
 ///
@@ -339,7 +404,10 @@ impl<'de> Deserialize<'de> for ToolDisplay {
             "full" => Ok(Self::Full),
             "compact" => Ok(Self::Compact),
             "none" | "off" | "hidden" => Ok(Self::None),
-            other => Err(serde::de::Error::unknown_variant(other, &["full", "compact", "none"])),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["full", "compact", "none"],
+            )),
         }
     }
 }
@@ -392,28 +460,71 @@ pub struct ReactionTiming {
 
 // --- defaults ---
 
-fn default_working_dir() -> String { "/tmp".into() }
-fn default_max_sessions() -> usize { 10 }
-fn default_ttl_hours() -> u64 { 4 }
-fn default_true() -> bool { true }
+fn default_working_dir() -> String {
+    "/tmp".into()
+}
+fn default_max_sessions() -> usize {
+    10
+}
+fn default_ttl_hours() -> u64 {
+    4
+}
+pub(crate) fn default_prompt_hard_timeout_secs() -> u64 {
+    30 * 60
+}
+pub(crate) fn default_liveness_check_secs() -> u64 {
+    30
+}
+fn default_true() -> bool {
+    true
+}
 
-fn emoji_queued() -> String { "👀".into() }
-fn emoji_thinking() -> String { "🤔".into() }
-fn emoji_tool() -> String { "🔥".into() }
-fn emoji_coding() -> String { "👨‍💻".into() }
-fn emoji_web() -> String { "⚡".into() }
-fn emoji_done() -> String { "🆗".into() }
-fn emoji_error() -> String { "😱".into() }
+fn emoji_queued() -> String {
+    "👀".into()
+}
+fn emoji_thinking() -> String {
+    "🤔".into()
+}
+fn emoji_tool() -> String {
+    "🔥".into()
+}
+fn emoji_coding() -> String {
+    "👨‍💻".into()
+}
+fn emoji_web() -> String {
+    "⚡".into()
+}
+fn emoji_done() -> String {
+    "🆗".into()
+}
+fn emoji_error() -> String {
+    "😱".into()
+}
 
-fn default_debounce_ms() -> u64 { 700 }
-fn default_stall_soft_ms() -> u64 { 10_000 }
-fn default_stall_hard_ms() -> u64 { 30_000 }
-fn default_done_hold_ms() -> u64 { 1_500 }
-fn default_error_hold_ms() -> u64 { 2_500 }
+fn default_debounce_ms() -> u64 {
+    700
+}
+fn default_stall_soft_ms() -> u64 {
+    10_000
+}
+fn default_stall_hard_ms() -> u64 {
+    30_000
+}
+fn default_done_hold_ms() -> u64 {
+    1_500
+}
+fn default_error_hold_ms() -> u64 {
+    2_500
+}
 
 impl Default for PoolConfig {
     fn default() -> Self {
-        Self { max_sessions: default_max_sessions(), session_ttl_hours: default_ttl_hours() }
+        Self {
+            max_sessions: default_max_sessions(),
+            session_ttl_hours: default_ttl_hours(),
+            prompt_hard_timeout_secs: default_prompt_hard_timeout_secs(),
+            liveness_check_secs: default_liveness_check_secs(),
+        }
     }
 }
 
@@ -432,8 +543,13 @@ impl Default for ReactionsConfig {
 impl Default for ReactionEmojis {
     fn default() -> Self {
         Self {
-            queued: emoji_queued(), thinking: emoji_thinking(), tool: emoji_tool(),
-            coding: emoji_coding(), web: emoji_web(), done: emoji_done(), error: emoji_error(),
+            queued: emoji_queued(),
+            thinking: emoji_thinking(),
+            tool: emoji_tool(),
+            coding: emoji_coding(),
+            web: emoji_web(),
+            done: emoji_done(),
+            error: emoji_error(),
         }
     }
 }
@@ -441,8 +557,10 @@ impl Default for ReactionEmojis {
 impl Default for ReactionTiming {
     fn default() -> Self {
         Self {
-            debounce_ms: default_debounce_ms(), stall_soft_ms: default_stall_soft_ms(),
-            stall_hard_ms: default_stall_hard_ms(), done_hold_ms: default_done_hold_ms(),
+            debounce_ms: default_debounce_ms(),
+            stall_soft_ms: default_stall_soft_ms(),
+            stall_hard_ms: default_stall_hard_ms(),
+            done_hold_ms: default_done_hold_ms(),
             error_hold_ms: default_error_hold_ms(),
         }
     }
@@ -516,17 +634,36 @@ fn parse_config(raw: &str, source: &str) -> anyhow::Result<Config> {
     // and max_batch_tokens > 0 (otherwise the consumer's token-cap check forces every
     // batch to size 1 — functionally per-message via a confusing path).
     if let Some(ref d) = config.discord {
-        anyhow::ensure!(d.max_buffered_messages > 0, "discord.max_buffered_messages must be > 0");
-        anyhow::ensure!(d.max_batch_tokens > 0, "discord.max_batch_tokens must be > 0");
+        anyhow::ensure!(
+            d.max_buffered_messages > 0,
+            "discord.max_buffered_messages must be > 0"
+        );
+        anyhow::ensure!(
+            d.max_batch_tokens > 0,
+            "discord.max_batch_tokens must be > 0"
+        );
     }
     if let Some(ref s) = config.slack {
-        anyhow::ensure!(s.max_buffered_messages > 0, "slack.max_buffered_messages must be > 0");
+        anyhow::ensure!(
+            s.max_buffered_messages > 0,
+            "slack.max_buffered_messages must be > 0"
+        );
         anyhow::ensure!(s.max_batch_tokens > 0, "slack.max_batch_tokens must be > 0");
     }
     if let Some(ref g) = config.gateway {
-        anyhow::ensure!(g.max_buffered_messages > 0, "gateway.max_buffered_messages must be > 0");
-        anyhow::ensure!(g.max_batch_tokens > 0, "gateway.max_batch_tokens must be > 0");
+        anyhow::ensure!(
+            g.max_buffered_messages > 0,
+            "gateway.max_buffered_messages must be > 0"
+        );
+        anyhow::ensure!(
+            g.max_batch_tokens > 0,
+            "gateway.max_batch_tokens must be > 0"
+        );
     }
+    anyhow::ensure!(
+        config.pool.liveness_check_secs > 0,
+        "pool.liveness_check_secs must be > 0 (zero would spin the recv loop)"
+    );
 
     Ok(config)
 }
@@ -586,7 +723,10 @@ command = "echo"
     fn parse_invalid_toml_returns_error() {
         let result = parse_config("not valid toml {{{}}", "test");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("failed to parse config from test"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("failed to parse config from test"));
     }
 
     #[test]
@@ -608,7 +748,10 @@ command = "echo"
     async fn load_config_from_url_invalid_host() {
         let result = load_config_from_url("https://invalid.test.example/config.toml").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("failed to fetch remote config"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("failed to fetch remote config"));
     }
 
     #[test]
@@ -630,7 +773,10 @@ command = "echo"
         assert!(gw.allow_all_channels.is_none());
         // resolve_allow_all: empty lists → allow all
         assert!(resolve_allow_all(gw.allow_all_users, &gw.allowed_users));
-        assert!(resolve_allow_all(gw.allow_all_channels, &gw.allowed_channels));
+        assert!(resolve_allow_all(
+            gw.allow_all_channels,
+            &gw.allowed_channels
+        ));
     }
 
     #[test]
@@ -652,7 +798,10 @@ command = "echo"
         assert_eq!(gw.allowed_channels, vec!["C1"]);
         // resolve_allow_all: non-empty lists → restricted
         assert!(!resolve_allow_all(gw.allow_all_users, &gw.allowed_users));
-        assert!(!resolve_allow_all(gw.allow_all_channels, &gw.allowed_channels));
+        assert!(!resolve_allow_all(
+            gw.allow_all_channels,
+            &gw.allowed_channels
+        ));
     }
 
     #[test]
@@ -763,5 +912,30 @@ command = "echo"
         let gw = cfg.gateway.unwrap();
         // explicit flag overrides non-empty list
         assert!(resolve_allow_all(gw.allow_all_users, &gw.allowed_users));
+    }
+
+    #[test]
+    fn stt_echo_transcript_defaults_to_false() {
+        let cfg = SttConfig::default();
+        assert!(
+            !cfg.echo_transcript,
+            "echo_transcript should default to false"
+        );
+    }
+
+    #[test]
+    fn stt_echo_transcript_respects_explicit_false() {
+        let toml = r#"
+[agent]
+command = "echo"
+
+[stt]
+enabled = true
+api_key = "test"
+echo_transcript = false
+"#;
+        let cfg = parse_config(toml, "test").unwrap();
+        assert!(cfg.stt.enabled);
+        assert!(!cfg.stt.echo_transcript);
     }
 }

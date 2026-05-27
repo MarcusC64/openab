@@ -1,0 +1,31 @@
+apiVersion: oab.dev/v1
+kind: OABService
+metadata:
+  name: kiro-01
+  namespace: prod
+spec:
+  capacityProvider: FARGATE_SPOT
+  cpu: 256
+  memory: 512
+  taskDefinition:
+    image: 123456789.dkr.ecr.us-east-1.amazonaws.com/openab:latest
+  bootstrapFrom: s3://oab-backups/agents/kiro-01/latest.tar.gz
+  networking:
+    subnets: [subnet-aaa, subnet-bbb]
+    securityGroups: [sg-oab]
+    assignPublicIp: false
+  secrets:
+    - name: DISCORD_TOKEN
+      valueFrom: /oab/prod/kiro-01/discord-token
+  config:
+    channels:
+      - type: discord
+    backend:
+      type: bedrock
+      model_id: anthropic.claude-sonnet-4-20250514
+      region: us-east-1
+    steering:
+      system_prompt: "You are Kiro, an AI agent running on OpenAB."
+    features:
+      stt: false
+      cronjob: true

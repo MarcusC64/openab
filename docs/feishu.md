@@ -80,6 +80,8 @@ https://your-gateway-host/webhook/feishu
 | — | `FEISHU_ALLOW_BOTS` | `off` | Bot message handling: `off` / `mentions` / `all` |
 | — | `FEISHU_TRUSTED_BOT_IDS` | — | Comma-separated open_id list of known bots |
 | — | `FEISHU_MAX_BOT_TURNS` | `20` | Max consecutive bot replies per channel before suppression |
+| — | `FEISHU_SESSION_TTL_HOURS` | `24` | How long the bot remembers thread participation (hours). After expiry, @mention is required again. |
+| — | `FEISHU_ALLOW_USER_MESSAGES` | `involved` | Thread response mode: `involved` / `mentions` / `multibot-mentions`. See below. |
 | `gateway.botUsername` | — | — | Set to bot's `open_id` for @mention gating |
 | `gateway.streaming` | — | `false` | Enable streaming (typewriter) mode |
 
@@ -94,6 +96,32 @@ In group chats, the bot only responds when @mentioned (default). To find your bo
 2. Set `gateway.botUsername` to this value.
 
 To disable mention gating: `feishu.requireMention: false`.
+
+### Thread Participation (Involved Mode)
+
+Once the bot replies in a thread (topic), it remembers that thread and responds to subsequent messages **without requiring @mention** — similar to Discord's `allow_user_messages: "involved"` mode.
+
+- Only applies to threads (messages with `root_id`). Main channel messages always require @mention.
+- Participation is stored in memory. Gateway restart clears the cache; users need to @mention once to re-engage.
+- TTL controlled by `FEISHU_SESSION_TTL_HOURS` (default 24h). After expiry, @mention is required again.
+
+### Multi-Bot Threads (multibot-mentions Mode)
+
+When `FEISHU_ALLOW_USER_MESSAGES=multibot-mentions`, the bot detects when another bot is @mentioned in a participated thread and reverts to requiring @mention — preventing all bots from responding simultaneously.
+
+| Mode | Behavior |
+|------|----------|
+| `involved` (default) | Bot responds in participated threads without @mention. All participated bots respond. |
+| `multibot-mentions` | Same as `involved`, but once another bot is @mentioned in the thread, require @mention for all bots. |
+| `mentions` | Always require @mention, even in participated threads. |
+
+**Multi-bot detection** (how the gateway identifies "another bot"):
+
+1. If `FEISHU_TRUSTED_BOT_IDS` is set → exact match against configured IDs
+2. If only `FEISHU_ALLOWED_USERS` is set → any @mention that is not self and not in allowed_users is inferred as another bot (recommended, zero-config)
+3. If neither is set → no multibot detection
+
+Note: Detection only triggers in threads where the bot has already participated. This prevents premature marking of threads the bot hasn't joined.
 
 ## Security Notes
 
@@ -137,13 +165,14 @@ The gateway downloads and forwards image and text file attachments to the AI age
 | Feishu msg_type | Handling |
 |-----------------|----------|
 | `text` | Text extracted, forwarded as prompt |
-| `image` | Image downloaded, resized (max 1200px), JPEG compressed, base64 encoded → `ContentBlock::Image` |
+| `image` | Image downloaded, resized (max 1200px), JPEG compressed, stored to `~/.openab/media/inbound/<uuid>` → `ContentBlock::Image` |
 | `file` | Text files only (`.txt`, `.py`, `.rs`, `.md`, `.json`, etc., max 512KB). Non-text files (`.pdf`, `.zip`, etc.) are silently ignored. |
+| `audio` | Voice message downloaded (opus/ogg, max 25MB), stored to filesystem, forwarded to core. If `[stt]` is enabled, core transcribes via Whisper API and injects `[Voice message transcript]: ...` into the prompt. If STT is disabled or fails, the message is silently skipped. |
 | `post` | Rich text: text nodes extracted as prompt, `img` nodes downloaded as image attachments. This is the format Feishu uses when @mention + paste image in a group. |
 
 **Group chat limitation:** Feishu does not allow @mention and image upload in the same message. However, @mention + paste (Ctrl+V) an image works — Feishu sends this as a `post` message containing both the mention and the image. Direct image upload (via the attachment button) cannot include @mention, so the bot will not respond in groups.
 
-**Processing pipeline:** Gateway downloads media using `GET /im/v1/messages/{message_id}/resources/{key}?type=image` with `tenant_access_token`, resizes to max 1200px, compresses to JPEG (quality 75), base64 encodes, and embeds in the `GatewayEvent.content.attachments` field. OAB core decodes attachments into `ContentBlock::Image` or `ContentBlock::Text` for the AI agent.
+**Processing pipeline:** Gateway downloads media using `GET /im/v1/messages/{message_id}/resources/{key}?type=image` with `tenant_access_token`, resizes to max 1200px, compresses to JPEG (quality 75), and stores to `~/.openab/media/inbound/<uuid>`. The file path is passed in `GatewayEvent.content.attachments[].path`. OAB core reads the file directly from disk and converts to `ContentBlock::Image` or `ContentBlock::Text` for the AI agent.
 
 ## Streaming (Typewriter)
 
@@ -171,6 +200,22 @@ To start a threaded conversation: reply to any bot message in a group chat (long
 **Limitation:** Messages sent directly in the Feishu thread panel (not via the "Reply" action) do not include `root_id` and will be treated as regular group messages. Use the "Reply" action to ensure thread context is preserved.
 
 Streaming (typewriter) mode works in threads — edits target the same message regardless of thread context.
+
+## Agent-Controlled Reply-To
+
+Agents can reply to a specific message using the `[[reply_to:message_id]]` output directive (see [docs/output-directives.md](output-directives.md)). The gateway sends the reply via Feishu's native Reply API, showing a quote reference in the UI.
+
+```
+Agent output:
+  [[reply_to:om_xxx]]
+  This is my reply to that specific message.
+```
+
+**How agents get message IDs:** Every incoming message includes `message_id` in the `SenderContext` injected into the agent prompt. Agents can store and reference these IDs to reply to specific messages.
+
+**Fallback:** If the specified message ID is invalid or the Reply API fails, the gateway automatically falls back to a plain send (no quote).
+
+**Use case:** In multi-bot threads, each bot can reply to a different message, creating clear visual conversation threads within a Feishu thread.
 
 ## Bot-to-Bot Collaboration (Gateway-Side Only)
 

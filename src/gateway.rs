@@ -10,6 +10,9 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
+/// Timeout for waiting on gateway reply acknowledgement.
+const GATEWAY_REPLY_TIMEOUT_SECS: u64 = 5;
+
 // --- Gateway event/reply schemas (mirrors gateway service) ---
 
 #[derive(Clone, Debug, Deserialize)]
@@ -61,9 +64,13 @@ struct GwAttachment {
     attachment_type: String,
     filename: String,
     mime_type: String,
+    #[serde(default)]
     data: String,
     #[allow(dead_code)]
     size: u64,
+    /// Colocate mode: local file path (preferred over base64 `data` when present)
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -77,6 +84,11 @@ struct GatewayReply {
     command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
+    /// When set, the gateway should send this message as a reply/quote to the specified message ID.
+    /// Unlike `reply_to` (routing/dedup identifier for the triggering event), this field controls
+    /// the visual reply/quote UI on the platform. Falls back to plain send on failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quote_message_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -107,12 +119,16 @@ struct GatewayResponse {
 // --- GatewayAdapter: ChatAdapter over WebSocket ---
 
 type PendingRequests = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<GatewayResponse>>>>;
-type SharedWsTx = Arc<Mutex<futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+type SharedWsTx = Arc<
+    Mutex<
+        futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
     >,
-    Message,
->>>;
+>;
 
 pub struct GatewayAdapter {
     ws_tx: SharedWsTx,
@@ -134,6 +150,74 @@ impl GatewayAdapter {
             platform_name,
             streaming,
         }
+    }
+
+    /// Internal helper for send_message / send_message_with_reply.
+    async fn send_gateway_reply(
+        &self,
+        channel: &ChannelRef,
+        content: &str,
+        quote_message_id: Option<&str>,
+    ) -> Result<MessageRef> {
+        let req_id = if self.streaming {
+            Some(format!("req_{}", uuid::Uuid::new_v4()))
+        } else {
+            None
+        };
+        let pending_rx = if let Some(ref id) = req_id {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.pending.lock().await.insert(id.clone(), tx);
+            Some(rx)
+        } else {
+            None
+        };
+        let reply = GatewayReply {
+            schema: "openab.gateway.reply.v1".into(),
+            reply_to: channel.origin_event_id.clone().unwrap_or_default(),
+            platform: channel.platform.clone(),
+            channel: ReplyChannel {
+                id: channel.channel_id.clone(),
+                thread_id: channel.thread_id.clone(),
+            },
+            content: ReplyContent {
+                content_type: "text".into(),
+                text: content.into(),
+            },
+            command: None,
+            request_id: req_id.clone(),
+            quote_message_id: quote_message_id.map(|s| s.to_string()),
+        };
+        let json = serde_json::to_string(&reply)?;
+        if let Err(e) = self.ws_tx.lock().await.send(Message::Text(json)).await {
+            if let Some(ref id) = req_id {
+                self.pending.lock().await.remove(id);
+            }
+            return Err(e.into());
+        }
+        let msg_id = if let (Some(rx), Some(ref id)) = (pending_rx, &req_id) {
+            match tokio::time::timeout(std::time::Duration::from_secs(GATEWAY_REPLY_TIMEOUT_SECS), rx).await {
+                Ok(Ok(resp)) if resp.success => resp.message_id.unwrap_or_else(|| "gw_sent".into()),
+                Ok(Ok(_resp)) => {
+                    tracing::warn!(request_id = %id, "gateway replied with failure");
+                    "gw_sent".into()
+                }
+                Ok(Err(_)) => {
+                    tracing::warn!(request_id = %id, "gateway response channel closed");
+                    "gw_sent".into()
+                }
+                Err(_) => {
+                    tracing::warn!(request_id = %id, "gateway reply timed out");
+                    self.pending.lock().await.remove(id);
+                    "gw_sent".into()
+                }
+            }
+        } else {
+            "gw_sent".into()
+        };
+        Ok(MessageRef {
+            channel: channel.clone(),
+            message_id: msg_id,
+        })
     }
 }
 
@@ -158,6 +242,7 @@ async fn send_fire_and_forget(
         },
         command: None,
         request_id: None,
+        quote_message_id: None,
     };
     let json = serde_json::to_string(&reply)?;
     ws_tx.lock().await.send(Message::Text(json)).await?;
@@ -263,10 +348,7 @@ async fn handle_config_command(
                         Err(e) => Some(format!("❌ Failed to switch: {e}")),
                     };
                 } else {
-                    return Some(format!(
-                        "⚠️ Invalid number. Use 1–{}.",
-                        all_values.len()
-                    ));
+                    return Some(format!("⚠️ Invalid number. Use 1–{}.", all_values.len()));
                 }
             }
             // Exact match on value or name
@@ -304,56 +386,16 @@ impl ChatAdapter for GatewayAdapter {
     }
 
     async fn send_message(&self, channel: &ChannelRef, content: &str) -> Result<MessageRef> {
-        let req_id = if self.streaming {
-            Some(format!("req_{}", uuid::Uuid::new_v4()))
-        } else {
-            None
-        };
+        self.send_gateway_reply(channel, content, None).await
+    }
 
-        let pending_rx = if let Some(ref id) = req_id {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            self.pending.lock().await.insert(id.clone(), tx);
-            Some(rx)
-        } else {
-            None
-        };
-
-        let reply = GatewayReply {
-            schema: "openab.gateway.reply.v1".into(),
-            reply_to: channel.origin_event_id.clone().unwrap_or_default(),
-            platform: channel.platform.clone(),
-            channel: ReplyChannel {
-                id: channel.channel_id.clone(),
-                thread_id: channel.thread_id.clone(),
-            },
-            content: ReplyContent {
-                content_type: "text".into(),
-                text: content.into(),
-            },
-            command: None,
-            request_id: req_id.clone(),
-        };
-        let json = serde_json::to_string(&reply)?;
-        self.ws_tx.lock().await.send(Message::Text(json)).await?;
-
-        // When streaming is enabled, wait for gateway to return real message_id
-        // (needed for edit_message). Otherwise fire-and-forget.
-        let msg_id = if let (Some(rx), Some(ref id)) = (pending_rx, &req_id) {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-                Ok(Ok(resp)) if resp.success => resp.message_id.unwrap_or_else(|| "gw_sent".into()),
-                _ => {
-                    self.pending.lock().await.remove(id);
-                    "gw_sent".into()
-                }
-            }
-        } else {
-            "gw_sent".into()
-        };
-
-        Ok(MessageRef {
-            channel: channel.clone(),
-            message_id: msg_id,
-        })
+    async fn send_message_with_reply(
+        &self,
+        channel: &ChannelRef,
+        content: &str,
+        reply_to_message_id: &str,
+    ) -> Result<MessageRef> {
+        self.send_gateway_reply(channel, content, Some(reply_to_message_id)).await
     }
 
     async fn create_thread(
@@ -381,6 +423,7 @@ impl ChatAdapter for GatewayAdapter {
             },
             command: Some("create_topic".into()),
             request_id: Some(req_id.clone()),
+            quote_message_id: None,
         };
         let json = serde_json::to_string(&reply)?;
         self.ws_tx.lock().await.send(Message::Text(json)).await?;
@@ -420,6 +463,7 @@ impl ChatAdapter for GatewayAdapter {
                 text: emoji.into(),
             },
             command: Some("add_reaction".into()),
+            quote_message_id: None,
             request_id: None,
         };
         let json = serde_json::to_string(&reply)?;
@@ -441,6 +485,7 @@ impl ChatAdapter for GatewayAdapter {
                 text: emoji.into(),
             },
             command: Some("remove_reaction".into()),
+            quote_message_id: None,
             request_id: None,
         };
         let json = serde_json::to_string(&reply)?;
@@ -462,6 +507,7 @@ impl ChatAdapter for GatewayAdapter {
                 text: content.into(),
             },
             command: Some("edit_message".into()),
+            quote_message_id: None,
             request_id: None,
         };
         let json = serde_json::to_string(&reply)?;
@@ -487,6 +533,7 @@ pub struct GatewayParams {
     pub allow_all_users: bool,
     pub allowed_users: Vec<String>,
     pub streaming: bool,
+    pub stt: crate::config::SttConfig,
 }
 
 pub async fn run_gateway_adapter(
@@ -505,6 +552,7 @@ pub async fn run_gateway_adapter(
     let allow_all_users = params.allow_all_users;
     let allowed_users = params.allowed_users;
     let streaming = params.streaming;
+    let stt_config = params.stt;
 
     let connect_url = match &params.token {
         Some(token) => {
@@ -548,8 +596,12 @@ pub async fn run_gateway_adapter(
         let (ws_tx, mut ws_rx) = ws_stream.split();
         let ws_tx: SharedWsTx = Arc::new(Mutex::new(ws_tx));
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
-        let adapter: Arc<dyn ChatAdapter> =
-            Arc::new(GatewayAdapter::new(ws_tx.clone(), pending.clone(), platform, streaming));
+        let adapter: Arc<dyn ChatAdapter> = Arc::new(GatewayAdapter::new(
+            ws_tx.clone(),
+            pending.clone(),
+            platform,
+            streaming,
+        ));
         let slash_ws_tx = ws_tx.clone(); // for fire-and-forget slash command responses
         let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
@@ -637,6 +689,8 @@ pub async fn run_gateway_adapter(
                                         } else {
                                             event.timestamp.clone()
                                         }),
+                                        message_id: if event.message_id.is_empty() { None } else { Some(event.message_id.clone()) },
+                                        receiver_id: None, // gateway does not yet resolve receiver identity
                                     };
                                     let sender_json = serde_json::to_string(&sender_ctx)
                                         .unwrap_or_default();
@@ -655,21 +709,81 @@ pub async fn run_gateway_adapter(
                                     // Convert gateway attachments to ContentBlocks
                                     let mut extra_blocks = Vec::new();
                                     for att in &event.content.attachments {
+                                        // Read bytes: prefer file path (colocate), fallback to base64
+                                        let bytes_result = if let Some(ref path) = att.path {
+                                            tokio::fs::read(path).await.map_err(|e| e.to_string())
+                                        } else if !att.data.is_empty() {
+                                            use base64::Engine;
+                                            base64::engine::general_purpose::STANDARD
+                                                .decode(&att.data)
+                                                .map_err(|e| e.to_string())
+                                        } else {
+                                            Err("no path or data".into())
+                                        };
+
                                         match att.attachment_type.as_str() {
                                             "image" => {
-                                                extra_blocks.push(ContentBlock::Image {
-                                                    media_type: att.mime_type.clone(),
-                                                    data: att.data.clone(),
-                                                });
+                                                match bytes_result {
+                                                    Ok(bytes) => {
+                                                        use base64::Engine;
+                                                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                                        extra_blocks.push(ContentBlock::Image {
+                                                            media_type: att.mime_type.clone(),
+                                                            data: b64,
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(filename = %att.filename, error = %e, "gateway image read failed");
+                                                    }
+                                                }
                                             }
                                             "text_file" => {
-                                                use base64::Engine;
-                                                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&att.data) {
+                                                if let Ok(bytes) = bytes_result {
                                                     let text = String::from_utf8_lossy(&bytes);
                                                     extra_blocks.push(ContentBlock::Text {
                                                         text: format!("```{}\n{}\n```", att.filename, text),
                                                     });
                                                 }
+                                            }
+                                            "audio" if stt_config.enabled => {
+                                                match bytes_result {
+                                                    Ok(bytes) => {
+                                                        match crate::stt::transcribe(
+                                                            &crate::media::HTTP_CLIENT,
+                                                            &stt_config,
+                                                            bytes,
+                                                            att.filename.clone(),
+                                                            &att.mime_type,
+                                                        ).await {
+                                                            Some(transcript) => {
+                                                                extra_blocks.push(ContentBlock::Text {
+                                                                    text: format!("[Voice message transcript]: {transcript}"),
+                                                                });
+                                                            }
+                                                            None => {
+                                                                tracing::warn!(filename = %att.filename, "gateway audio STT failed");
+                                                                extra_blocks.push(ContentBlock::Text {
+                                                                    text: format!(
+                                                                        "[Voice message — transcription failed for {}]",
+                                                                        att.filename
+                                                                    ),
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(filename = %att.filename, error = %e, "gateway audio read failed");
+                                                        extra_blocks.push(ContentBlock::Text {
+                                                            text: format!(
+                                                                "[Voice message — read failed for {}]",
+                                                                att.filename
+                                                            ),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            "audio" => {
+                                                tracing::debug!(filename = %att.filename, "audio attachment skipped — STT not enabled");
                                             }
                                             _ => {}
                                         }
@@ -792,4 +906,3 @@ pub async fn run_gateway_adapter(
         backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
     } // outer reconnect loop
 }
-

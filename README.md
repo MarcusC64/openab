@@ -4,26 +4,26 @@
 
 ![OpenAB banner](images/banner.jpg)
 
-A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack**, and any [Agent Client Protocol](https://github.com/anthropics/agent-protocol)-compatible coding CLI (Kiro CLI, Claude Code, Codex, Gemini, OpenCode, Copilot CLI, etc.) over stdio JSON-RPC — delivering the next-generation development experience. **Telegram, LINE, Feishu/Lark, Google Chat**, and other webhook-based platforms are supported via the standalone [Custom Gateway](gateway/).
+A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack**, and any [Agent Client Protocol](https://github.com/anthropics/agent-protocol)-compatible coding CLI (Kiro CLI, Claude Code, Codex, Gemini, OpenCode, Copilot CLI, Hermes, Grok Build, Antigravity, Pi, etc.) over stdio JSON-RPC — delivering the next-generation development experience. **Telegram, LINE, Feishu/Lark, Google Chat**, and other webhook-based platforms are supported via the standalone [Custom Gateway](gateway/).
 
 🪼 **Join our community!** Come say hi on Discord — we'd love to have you: **[🪼 OpenAB — Official](https://discord.gg/DmbhfDZjQS)** 🎉
 
 ```
-┌──────────────┐  Gateway WS   ┌──────────────┐  ACP stdio    ┌──────────────┐
-│   Discord    │◄─────────────►│              │──────────────►│  coding CLI  │
-│   User       │               │    openab    │◄── JSON-RPC ──│  (acp mode)  │
-├──────────────┤  Socket Mode  │    (Rust)    │               └──────────────┘
-│   Slack      │◄─────────────►│              │
-│   User       │               └──────┬───────┘
-├──────────────┤                      │ WebSocket (outbound)
-│   Telegram   │◄──webhook──┐         │
-│   User       │            │         │
-├──────────────┤            ▼         ▼
-│   LINE       │◄──webhook──┌──────────────────┐
-│   User       │            │  Custom Gateway  │
-├──────────────┤            │  (standalone)    │
-│  Feishu/Lark │◄───WS──────│                  │
-│   User       │            │                  │
+┌──────────────┐  Gateway WS   ┌──────────────┐  ACP stdio    ┌──────────────────┐
+│   Discord    │◄─────────────►│              │──────────────►│   coding CLI     │
+│   User       │               │    openab    │◄── JSON-RPC ──│   (acp mode)     │
+├──────────────┤  Socket Mode  │    (Rust)    │               ├──────────────────┤
+│   Slack      │◄─────────────►│              │               │ kiro-cli acp     │
+│   User       │               └──────┬───────┘               │ claude-agent-acp │
+├──────────────┤                      │  WebSocket            │ codex-acp        │
+│   Telegram   │◄──webhook──┐         │   (outbound)          │ gemini --acp     │
+│   User       │            │         │                       │ copilot --acp    │
+├──────────────┤            ▼         ▼                       │ hermes-acp       │
+│   LINE       │◄──webhook──┌──────────────────┐              │ opencode acp     │
+│   User       │            │  Custom Gateway  │              │ grok agent stdio │
+├──────────────┤            │  (standalone)    │              │ agy-acp          │
+│  Feishu/Lark │◄───WS──────│                  │              │ pi-acp           │
+│   User       │            │                  │              └──────────────────┘
 ├──────────────┤            │                  │
 │ Google Chat  │◄──webhook──│                  │
 │   User       │            └──────────────────┘
@@ -38,10 +38,11 @@ A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack**,
 
 - **Multi-platform** — supports Discord and Slack, run one or both simultaneously
 - **Custom Gateway** — extend to Telegram, LINE, Feishu/Lark, Google Chat, MS Teams via standalone [gateway](gateway/)
-- **Pluggable agent backend** — swap between Kiro CLI, Claude Code, Codex, Gemini, OpenCode, Copilot CLI via config
+- **Pluggable agent backend** — swap between Kiro CLI, Claude Code, Codex, Gemini, OpenCode, Copilot CLI, Hermes, Grok Build, Antigravity, Pi via config
 - **@mention trigger** — mention the bot in an allowed channel to start a conversation
 - **Thread-based multi-turn** — auto-creates threads; no @mention needed for follow-ups
 - **Multi-agent collaboration** — bot-to-bot messaging for coordinated workflows ([docs/multi-agent.md](docs/multi-agent.md))
+- **Agent-controlled reply-to** — agents choose which message to reply to via `[[reply_to:id]]` directive, enabling clear conversation threads in multi-bot channels ([docs/output-directives.md](docs/output-directives.md))
 - **Edit-streaming** — live-updates the Discord message every 1.5s as tokens arrive
 - **Emoji status reactions** — 👀→🤔→🔥/👨‍💻/⚡→👍+random mood face
 - **Image & file support** — send images and files through chat ([docs/sendimages.md](docs/sendimages.md), [docs/sendfiles.md](docs/sendfiles.md))
@@ -111,6 +112,13 @@ See [docs/google-chat.md](docs/google-chat.md) for the full setup guide. Require
 
 </details>
 
+<details>
+<summary><strong>WeCom (企业微信)</strong> (via Custom Gateway)</summary>
+
+See [docs/wecom.md](docs/wecom.md) for the full setup guide. Requires the standalone [Custom Gateway](gateway/) service.
+
+</details>
+
 ### 2. Install with Helm (Kiro CLI — default)
 
 ```bash
@@ -128,6 +136,8 @@ helm install openab openab/openab \
   --set agents.kiro.slack.appToken="$SLACK_APP_TOKEN" \
   --set-string 'agents.kiro.slack.allowedChannels[0]=C0123456789'
 ```
+
+For additional Helm values such as `fullnameOverride`, `nameOverride`, `envFrom`, and `agentsMd`, see [charts/openab/README.md](charts/openab/README.md).
 
 ### 3. Authenticate (first time only)
 
@@ -158,6 +168,11 @@ The bot creates a thread. After that, just type in the thread — no @mention ne
 | OpenCode | `opencode acp` | Native | [docs/opencode.md](docs/opencode.md) |
 | Copilot CLI ⚠️ | `copilot --acp --stdio` | Native | [docs/copilot.md](docs/copilot.md) |
 | Cursor | `cursor-agent acp` | Native | [docs/cursor.md](docs/cursor.md) |
+| Hermes Agent | `hermes-acp` | Native | [docs/hermes.md](docs/hermes.md) |
+| Grok Build | `grok agent stdio` | Native | [docs/grok.md](docs/grok.md) |
+| Antigravity | `agy-acp` | [agy-acp](agy-acp/) | [docs/antigravity.md](docs/antigravity.md) |
+| Pi | `pi-acp` | [pi-acp](https://www.npmjs.com/package/pi-acp) | [docs/pi.md](docs/pi.md) |
+| **Native Agent** | `openab-agent` | Built-in (Rust) | [docs/native-agent.md](docs/native-agent.md) |
 
 > 🔧 Running multiple agents? See [docs/multi-agent.md](docs/multi-agent.md)
 
