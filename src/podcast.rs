@@ -41,6 +41,10 @@ pub struct PodcastResult {
 struct AppleIds {
     collection_id: String,
     episode_id: Option<String>,
+    /// Storefront country from the URL (e.g. "tw"). iTunes Lookup defaults to
+    /// the US store, so a podcast only listed in another storefront returns no
+    /// results unless we pass the right country.
+    country: Option<String>,
 }
 
 /// What the iTunes Lookup API tells us about the target episode.
@@ -152,51 +156,88 @@ fn parse_apple_url(url: &str) -> Option<AppleIds> {
         return None;
     }
 
+    static COUNTRY_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"podcasts\.apple\.com/([a-z]{2})/").unwrap());
+
     let collection_id = ID_RE.captures(url)?.get(1)?.as_str().to_string();
     let episode_id = EP_RE.captures(url).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
-    Some(AppleIds { collection_id, episode_id })
+    let country = COUNTRY_RE.captures(url).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+    Some(AppleIds { collection_id, episode_id, country })
 }
 
-/// Query the public iTunes Lookup API. Prefers the episode id (returns the
-/// episode directly); otherwise looks up the collection and takes its latest
-/// episode.
+/// Query the public iTunes Lookup API. Looks up the *collection* (podcast) so we
+/// reliably get the RSS feedUrl, and — when episodes are returned — selects the
+/// target episode by matching the URL's `i=` value against each episode's
+/// `trackId`. Falls back to a direct episode-id lookup. The storefront `country`
+/// is included because the default US store may not list a regional podcast.
 async fn itunes_lookup(client: &reqwest::Client, ids: &AppleIds) -> Option<EpisodeInfo> {
-    let lookup_id = ids.episode_id.as_deref().unwrap_or(&ids.collection_id);
-    let url = format!(
-        "https://itunes.apple.com/lookup?id={lookup_id}&entity=podcastEpisode&limit=200"
-    );
+    let country = ids.country.as_deref().unwrap_or("us");
 
-    let resp = client.get(&url).send().await.ok()?;
+    // Primary: collection lookup (returns the show + its recent episodes).
+    let url = format!(
+        "https://itunes.apple.com/lookup?id={}&country={country}&entity=podcastEpisode&limit=200",
+        ids.collection_id
+    );
+    if let Some(info) = lookup_request(client, &url, ids.episode_id.as_deref()).await {
+        return Some(info);
+    }
+    warn!(collection_id = %ids.collection_id, country, "podcast: collection lookup empty, trying episode id");
+
+    // Fallback: direct episode-id lookup.
+    if let Some(eid) = &ids.episode_id {
+        let url = format!(
+            "https://itunes.apple.com/lookup?id={eid}&country={country}&entity=podcastEpisode"
+        );
+        if let Some(info) = lookup_request(client, &url, ids.episode_id.as_deref()).await {
+            return Some(info);
+        }
+    }
+    None
+}
+
+/// Run one iTunes Lookup request and extract the feed URL plus the target
+/// episode (matched by `trackId`, else the first episode carrying audio).
+async fn lookup_request(
+    client: &reqwest::Client,
+    url: &str,
+    episode_id: Option<&str>,
+) -> Option<EpisodeInfo> {
+    let resp = client.get(url).send().await.ok()?;
     if !resp.status().is_success() {
-        error!(status = %resp.status(), "itunes lookup failed");
+        warn!(status = %resp.status(), "podcast: itunes lookup HTTP error");
         return None;
     }
     let json: serde_json::Value = resp.json().await.ok()?;
     let results = json.get("results")?.as_array()?;
+    if results.is_empty() {
+        return None;
+    }
 
-    // Episode entry: the one carrying an audio enclosure (episodeUrl).
-    let episode = results.iter().find(|r| r.get("episodeUrl").is_some());
-    // feedUrl can live on the episode or the collection entry.
+    // feedUrl lives on the collection (and usually the episode) entries.
     let feed_url = results
         .iter()
         .find_map(|r| r.get("feedUrl").and_then(|v| v.as_str()))
         .map(str::to_string);
 
+    // Match the exact episode by trackId == i=, else fall back to the first
+    // result that carries an audio enclosure.
+    let episode = episode_id
+        .and_then(|eid| {
+            results.iter().find(|r| {
+                r.get("trackId")
+                    .and_then(|v| v.as_i64())
+                    .is_some_and(|t| t.to_string() == eid)
+                    && r.get("episodeUrl").is_some()
+            })
+        })
+        .or_else(|| results.iter().find(|r| r.get("episodeUrl").is_some()));
+
     let mut info = EpisodeInfo { feed_url, ..Default::default() };
     if let Some(ep) = episode {
         info.episode_url = ep.get("episodeUrl").and_then(|v| v.as_str()).map(str::to_string);
-        info.title = ep
-            .get("trackName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        info.title = ep.get("trackName").and_then(|v| v.as_str()).unwrap_or("").to_string();
     } else if let Some(first) = results.first() {
-        // Collection-only result (no episode entity returned).
-        info.title = first
-            .get("collectionName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        info.title = first.get("collectionName").and_then(|v| v.as_str()).unwrap_or("").to_string();
     }
 
     if info.episode_url.is_none() && info.feed_url.is_none() {
@@ -563,6 +604,7 @@ mod tests {
         let ids = parse_apple_url(url).unwrap();
         assert_eq!(ids.collection_id, "1500000000");
         assert_eq!(ids.episode_id.as_deref(), Some("1000600000000"));
+        assert_eq!(ids.country.as_deref(), Some("tw"));
     }
 
     #[test]
@@ -571,6 +613,7 @@ mod tests {
         let ids = parse_apple_url(url).unwrap();
         assert_eq!(ids.collection_id, "1200361736");
         assert_eq!(ids.episode_id, None);
+        assert_eq!(ids.country.as_deref(), Some("us"));
     }
 
     #[test]
@@ -579,6 +622,17 @@ mod tests {
         let ids = parse_apple_url(url).unwrap();
         assert_eq!(ids.collection_id, "42");
         assert_eq!(ids.episode_id.as_deref(), Some("99"));
+        assert_eq!(ids.country.as_deref(), Some("gb"));
+    }
+
+    #[test]
+    fn parses_cjk_slug_episode_url() {
+        // Real-world TW storefront URL with CJK characters in the slug.
+        let url = "https://podcasts.apple.com/tw/podcast/e240-openai-fde/id1498541229?i=1000773193034";
+        let ids = parse_apple_url(url).unwrap();
+        assert_eq!(ids.collection_id, "1498541229");
+        assert_eq!(ids.episode_id.as_deref(), Some("1000773193034"));
+        assert_eq!(ids.country.as_deref(), Some("tw"));
     }
 
     #[test]
