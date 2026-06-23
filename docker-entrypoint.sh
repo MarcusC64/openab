@@ -64,4 +64,15 @@ api_key = "${GROQ_API_KEY}"
 EOF
 fi
 
+# Apple Podcast summarization (Discord). Reuses [stt] above for audio
+# transcription, so it's enabled by default when GROQ_API_KEY is present.
+# Set OPENAB_PODCAST=false to disable.
+if [ -n "$GROQ_API_KEY" ] && [ "${OPENAB_PODCAST:-true}" = "true" ]; then
+    cat >> "$CONFIG" << EOF
+
+[podcast]
+enabled = true
+EOF
+fi
+
 exec openab run -c "$CONFIG"
