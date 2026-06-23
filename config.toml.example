@@ -105,6 +105,22 @@ working_dir = "/home/agent"
 max_sessions = 10
 session_ttl_hours = 24
 
+# Speech-to-text for voice messages (also used by the podcast feature below).
+# See docs/stt.md. Auto-detects GROQ_API_KEY when base_url is Groq.
+# [stt]
+# enabled = true
+# api_key = "${GROQ_API_KEY}"
+
+# Apple Podcast summarization (Discord). Paste an https://podcasts.apple.com/...
+# link and the agent receives the episode transcript + a summary instruction.
+# See docs/podcast.md. Transcription reuses the [stt] provider above; the audio
+# fallback needs ffmpeg on PATH.
+# [podcast]
+# enabled = true
+# max_minutes = 90                  # cap on audio sent to STT in the fallback path
+# ffmpeg_path = "ffmpeg"
+# summary_prompt = "以下是一集 Podcast 的逐字稿。請用繁體中文輸出 TL;DR + 3~7 條重點。"
+
 [markdown]
 tables = "code"  # "code" (default) | "bullets" | "off"
                  # code: wrap tables in fenced code blocks with aligned columns

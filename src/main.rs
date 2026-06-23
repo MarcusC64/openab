@@ -9,6 +9,7 @@ mod error_display;
 mod format;
 mod markdown;
 mod media;
+mod podcast;
 mod reactions;
 mod setup;
 mod slack;
@@ -137,6 +138,25 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("stt.enabled = true but no API key found — set stt.api_key in config or export GROQ_API_KEY");
         }
         info!(model = %cfg.stt.model, base_url = %cfg.stt.base_url, "STT enabled");
+    }
+
+    // Podcast summarization reuses the [stt] provider for its STT fallback.
+    if cfg.podcast.enabled {
+        if cfg.stt.api_key.is_empty() {
+            info!("podcast enabled without an [stt] api_key — only RSS-embedded transcripts will work (no audio fallback)");
+        }
+        match tokio::process::Command::new(&cfg.podcast.ffmpeg_path)
+            .arg("-version")
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {
+                info!(ffmpeg = %cfg.podcast.ffmpeg_path, max_minutes = cfg.podcast.max_minutes, "podcast enabled");
+            }
+            _ => {
+                warn!(ffmpeg = %cfg.podcast.ffmpeg_path, "podcast enabled but ffmpeg not found — audio STT fallback will be skipped (RSS transcripts still work)");
+            }
+        }
     }
 
     let router = Arc::new(AdapterRouter::new(pool.clone(), cfg.reactions, cfg.markdown.tables));
@@ -363,6 +383,7 @@ async fn main() -> anyhow::Result<()> {
             allowed_channels,
             allowed_users,
             stt_config: cfg.stt.clone(),
+            podcast_config: cfg.podcast.clone(),
             adapter: std::sync::OnceLock::new(),
             allow_bot_messages: discord_cfg.allow_bot_messages,
             trusted_bot_ids,
