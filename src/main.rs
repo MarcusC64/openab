@@ -3,6 +3,7 @@ mod config;
 mod discord;
 mod error_display;
 mod format;
+mod podcast;
 mod reactions;
 mod stt;
 
@@ -59,12 +60,32 @@ async fn main() -> anyhow::Result<()> {
         info!(model = %cfg.stt.model, base_url = %cfg.stt.base_url, "STT enabled");
     }
 
+    // Podcast summarization reuses the [stt] provider for its STT fallback.
+    if cfg.podcast.enabled {
+        if cfg.stt.api_key.is_empty() {
+            info!("podcast enabled without an [stt] api_key — only RSS-embedded transcripts will work (no audio fallback)");
+        }
+        match tokio::process::Command::new(&cfg.podcast.ffmpeg_path)
+            .arg("-version")
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {
+                info!(ffmpeg = %cfg.podcast.ffmpeg_path, max_minutes = cfg.podcast.max_minutes, "podcast enabled");
+            }
+            _ => {
+                tracing::warn!(ffmpeg = %cfg.podcast.ffmpeg_path, "podcast enabled but ffmpeg not found — audio STT fallback will be skipped (RSS transcripts still work)");
+            }
+        }
+    }
+
     let handler = discord::Handler {
         pool: pool.clone(),
         allowed_channels,
         allowed_users,
         reactions_config: cfg.reactions,
         stt_config: cfg.stt.clone(),
+        podcast_config: cfg.podcast.clone(),
     };
 
     let intents = GatewayIntents::GUILD_MESSAGES

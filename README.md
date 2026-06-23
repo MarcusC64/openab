@@ -26,6 +26,7 @@ A lightweight, secure, cloud-native ACP harness that bridges Discord and any [Ag
 - **ACP protocol** — JSON-RPC over stdio with tool call, thinking, and permission auto-reply support
 - **Kubernetes-ready** — Dockerfile + k8s manifests with PVC for auth persistence
 - **Voice message STT** — auto-transcribes Discord voice messages via Groq, OpenAI, or local Whisper server ([docs/stt.md](docs/stt.md))
+- **Apple Podcast summaries** — paste a podcasts.apple.com link and the agent gets the episode transcript + a summary prompt ([docs/podcast.md](docs/podcast.md))
 
 ## Quick Start
 
@@ -316,6 +317,8 @@ The PVC persists two paths via `subPath`:
     ├── main.rs         # entrypoint: tokio + serenity + cleanup + shutdown
     ├── config.rs       # TOML config + ${ENV_VAR} expansion
     ├── discord.rs      # Discord bot: mention, threads, edit-streaming
+    ├── stt.rs          # speech-to-text for voice messages
+    ├── podcast.rs      # Apple Podcast → transcript (iTunes lookup, RSS, ffmpeg+STT)
     ├── format.rs       # message splitting (2000 char limit)
     ├── reactions.rs    # status reaction controller (debounce, stall detection)
     └── acp/

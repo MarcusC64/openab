@@ -49,3 +49,19 @@ stall_soft_ms = 10000
 stall_hard_ms = 30000
 done_hold_ms = 1500
 error_hold_ms = 2500
+
+# Speech-to-text for voice messages (also used by the podcast feature below).
+# See docs/stt.md. Auto-detects GROQ_API_KEY when base_url is Groq.
+# [stt]
+# enabled = true
+# api_key = "${GROQ_API_KEY}"
+
+# Apple Podcast summarization. Paste an https://podcasts.apple.com/... link and
+# the agent receives the episode transcript + a summary instruction. See
+# docs/podcast.md. Transcription reuses the [stt] provider above; the audio
+# fallback needs ffmpeg on PATH.
+# [podcast]
+# enabled = true
+# max_minutes = 90                  # cap on audio sent to STT in the fallback path
+# ffmpeg_path = "ffmpeg"
+# summary_prompt = "以下是一集 Podcast 的逐字稿。請用繁體中文輸出 TL;DR + 3~7 條重點。"

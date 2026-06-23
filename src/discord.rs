@@ -1,5 +1,5 @@
 use crate::acp::{classify_notification, AcpEvent, ContentBlock, SessionPool};
-use crate::config::{ReactionsConfig, SttConfig};
+use crate::config::{PodcastConfig, ReactionsConfig, SttConfig};
 use crate::error_display::{format_coded_error, format_user_error};
 use crate::format;
 use crate::reactions::StatusReactionController;
@@ -27,12 +27,22 @@ static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .expect("static HTTP client must build")
 });
 
+/// Separate client for podcast work: episode audio downloads and multi-chunk
+/// STT can each take minutes, so the 30s attachment timeout is too aggressive.
+static PODCAST_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .expect("static podcast HTTP client must build")
+});
+
 pub struct Handler {
     pub pool: Arc<SessionPool>,
     pub allowed_channels: HashSet<u64>,
     pub allowed_users: HashSet<u64>,
     pub reactions_config: ReactionsConfig,
     pub stt_config: SttConfig,
+    pub podcast_config: PodcastConfig,
 }
 
 #[async_trait]
@@ -143,6 +153,33 @@ if msg.author.bot && msg.webhook_id.is_none() {
                 } else if let Some(content_block) = download_and_encode_image(attachment).await {
                     debug!(url = %attachment.url, filename = %attachment.filename, "adding image attachment");
                     content_blocks.push(content_block);
+                }
+            }
+        }
+
+        // Detect an Apple Podcast link and inject a transcript + summary
+        // instruction, mirroring the STT path above. The downstream agent
+        // (Kiro) produces the actual summary from the injected text.
+        if self.podcast_config.enabled {
+            if let Some(m) = crate::podcast::APPLE_PODCAST_RE.find(&prompt) {
+                let url = m.as_str().to_string();
+                debug!(%url, "apple podcast link detected");
+                if let Some(result) = crate::podcast::fetch_transcript(
+                    &PODCAST_HTTP_CLIENT,
+                    &self.stt_config,
+                    &self.podcast_config,
+                    &url,
+                )
+                .await
+                {
+                    debug!(title = %result.title, chars = result.transcript.len(), "podcast transcript injected");
+                    let injected = format!(
+                        "[Podcast 摘要任務] 節目：{}\n{}\n\n逐字稿：\n{}",
+                        result.title, self.podcast_config.summary_prompt, result.transcript
+                    );
+                    content_blocks.insert(0, ContentBlock::Text { text: injected });
+                } else {
+                    debug!(%url, "podcast transcript unavailable");
                 }
             }
         }
