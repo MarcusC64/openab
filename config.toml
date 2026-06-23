@@ -51,5 +51,16 @@ done_hold_ms = 1500
 error_hold_ms = 2500
 
 [stt]
-enabled = false
+enabled = true
 api_key = "${GROQ_API_KEY}"
+
+# Apple Podcast summarization (see docs/podcast.md). Paste an
+# https://podcasts.apple.com/... link in Discord and the agent receives the
+# episode transcript + a Traditional-Chinese summary instruction. Transcription
+# reuses the [stt] provider above; the audio fallback uses ffmpeg (bundled in
+# the image).
+[podcast]
+enabled = true
+# max_minutes = 90       # cap on audio minutes sent to STT in the fallback path
+# ffmpeg_path = "ffmpeg"
+# summary_prompt = "..." # override the default zh-TW TL;DR + bullet-point prompt
