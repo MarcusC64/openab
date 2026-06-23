@@ -110,11 +110,16 @@ pub async fn fetch_transcript(
 }
 
 /// Extract `id{collectionId}` and optional `?i={episodeId}` from an Apple URL.
+/// Returns `None` for non-Apple hosts so the parser is safe to call directly.
 fn parse_apple_url(url: &str) -> Option<AppleIds> {
     static ID_RE: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(r"/id(\d+)").unwrap());
     static EP_RE: LazyLock<regex::Regex> =
         LazyLock::new(|| regex::Regex::new(r"[?&]i=(\d+)").unwrap());
+
+    if !url.contains("podcasts.apple.com") {
+        return None;
+    }
 
     let collection_id = ID_RE.captures(url)?.get(1)?.as_str().to_string();
     let episode_id = EP_RE.captures(url).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
