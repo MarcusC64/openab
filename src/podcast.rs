@@ -19,7 +19,7 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// Minutes of audio per ffmpeg segment in the STT fallback. At a typical
 /// 128 kbps podcast bitrate this is ~9 MB/segment — comfortably under the 25 MB
@@ -76,11 +76,22 @@ pub async fn fetch_transcript(
     url: &str,
 ) -> Option<PodcastResult> {
     let client = &*PODCAST_HTTP_CLIENT;
-    let ids = parse_apple_url(url)?;
-    debug!(?ids, "parsed apple podcast url");
+    let Some(ids) = parse_apple_url(url) else {
+        warn!(%url, "podcast: not a parseable Apple Podcasts URL");
+        return None;
+    };
+    info!(collection_id = %ids.collection_id, episode_id = ?ids.episode_id, "podcast: parsed url");
 
-    let info = itunes_lookup(client, &ids).await?;
-    debug!(title = %info.title, has_feed = info.feed_url.is_some(), has_audio = info.episode_url.is_some(), "itunes lookup");
+    let Some(info) = itunes_lookup(client, &ids).await else {
+        warn!("podcast: iTunes lookup returned no audio/feed for this id");
+        return None;
+    };
+    info!(
+        title = %info.title,
+        has_feed = info.feed_url.is_some(),
+        has_audio = info.episode_url.is_some(),
+        "podcast: iTunes lookup ok"
+    );
 
     // Tier 1: RSS-embedded transcript.
     if let Some(feed_url) = &info.feed_url {
@@ -88,25 +99,45 @@ pub async fn fetch_transcript(
             let title = if info.title.is_empty() { item.title.clone() } else { info.title.clone() };
             if let Some(turl) = &item.transcript_url {
                 if let Some(text) = download_transcript(client, turl, item.transcript_type.as_deref()).await {
-                    info!(chars = text.len(), "using RSS-embedded transcript");
+                    info!(chars = text.len(), "podcast: using RSS-embedded transcript");
                     return Some(PodcastResult { title, transcript: text });
                 }
+                warn!(%turl, "podcast: RSS transcript URL found but download/parse failed");
+            } else {
+                info!("podcast: no RSS <podcast:transcript> tag, falling back to audio STT");
             }
             // RSS gave us no transcript but may have given a better audio URL.
             let audio = info.episode_url.clone().or(item.enclosure_url.clone());
-            if let Some(audio) = audio {
-                if let Some(text) = transcribe_by_chunks(client, stt_cfg, podcast_cfg, &audio).await {
-                    return Some(PodcastResult { title, transcript: text });
+            match audio {
+                Some(audio) => {
+                    if let Some(text) = transcribe_by_chunks(client, stt_cfg, podcast_cfg, &audio).await {
+                        info!(chars = text.len(), "podcast: using audio STT transcript");
+                        return Some(PodcastResult { title, transcript: text });
+                    }
+                    warn!("podcast: audio STT produced no transcript");
                 }
+                None => warn!("podcast: no audio enclosure URL available for STT"),
             }
             return None;
         }
+        warn!(%feed_url, "podcast: could not fetch/parse RSS feed");
     }
 
     // Tier 2: chunked STT on the iTunes-provided audio URL.
-    let audio = info.episode_url.clone()?;
-    let text = transcribe_by_chunks(client, stt_cfg, podcast_cfg, &audio).await?;
-    Some(PodcastResult { title: info.title, transcript: text })
+    let Some(audio) = info.episode_url.clone() else {
+        warn!("podcast: no audio URL and no usable RSS feed — giving up");
+        return None;
+    };
+    match transcribe_by_chunks(client, stt_cfg, podcast_cfg, &audio).await {
+        Some(text) => {
+            info!(chars = text.len(), "podcast: using audio STT transcript");
+            Some(PodcastResult { title: info.title, transcript: text })
+        }
+        None => {
+            warn!("podcast: audio STT produced no transcript");
+            None
+        }
+    }
 }
 
 /// Extract `id{collectionId}` and optional `?i={episodeId}` from an Apple URL.
@@ -376,23 +407,36 @@ async fn transcribe_by_chunks_inner(
     let input = work.join(format!("episode.{ext}"));
 
     // Download the enclosure to disk.
-    let resp = client.get(audio_url).send().await.ok()?;
+    info!(%audio_url, ext, "podcast: downloading episode audio");
+    let resp = match client.get(audio_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            error!(error = %e, %audio_url, "podcast: audio download request failed");
+            return None;
+        }
+    };
     if !resp.status().is_success() {
-        error!(status = %resp.status(), "audio download failed");
+        error!(status = %resp.status(), %audio_url, "podcast: audio download failed");
         return None;
     }
     if let Some(len) = resp.content_length() {
         if len > MAX_AUDIO_BYTES {
-            error!(len, "audio exceeds size ceiling, skipping");
+            error!(len, "podcast: audio exceeds size ceiling, skipping");
             return None;
         }
     }
-    let bytes = resp.bytes().await.ok()?;
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            error!(error = %e, "podcast: reading audio body failed");
+            return None;
+        }
+    };
     if std::fs::write(&input, &bytes).is_err() {
-        error!("failed to write audio temp file");
+        error!("podcast: failed to write audio temp file");
         return None;
     }
-    debug!(bytes = bytes.len(), "downloaded podcast audio");
+    info!(bytes = bytes.len(), "podcast: audio downloaded, splitting with ffmpeg");
 
     // Split into SEGMENT_MINUTES chunks via ffmpeg stream-copy (fast, lossless).
     let pattern = work.join(format!("chunk_%03d.{ext}"));
@@ -418,13 +462,14 @@ async fn transcribe_by_chunks_inner(
     };
 
     if chunks.is_empty() {
-        error!("ffmpeg produced no chunks");
+        error!("podcast: ffmpeg produced no chunks");
         return None;
     }
 
     // Cap the number of chunks we transcribe to respect max_minutes.
     let max_chunks = podcast_cfg.max_minutes.div_ceil(SEGMENT_MINUTES).max(1) as usize;
     let total = chunks.len();
+    info!(chunks = total, will_transcribe = max_chunks.min(total), "podcast: ffmpeg split done, transcribing chunks");
     let mime = audio_mime(ext);
     let mut transcript = String::new();
     for (i, chunk) in chunks.into_iter().take(max_chunks).enumerate() {
