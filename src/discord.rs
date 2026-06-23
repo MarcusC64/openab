@@ -2,7 +2,7 @@ use crate::acp::ContentBlock;
 use crate::acp::protocol::ConfigOption;
 use crate::adapter::{AdapterRouter, ChatAdapter, ChannelRef, MessageRef, SenderContext};
 use crate::bot_turns::{BotTurnTracker, TurnAction, TurnSeverity};
-use crate::config::{AllowBots, AllowUsers, SttConfig};
+use crate::config::{AllowBots, AllowUsers, PodcastConfig, SttConfig};
 use crate::format;
 use crate::media;
 use async_trait::async_trait;
@@ -143,6 +143,7 @@ pub struct Handler {
     pub allowed_channels: HashSet<u64>,
     pub allowed_users: HashSet<u64>,
     pub stt_config: SttConfig,
+    pub podcast_config: PodcastConfig,
     pub adapter: OnceLock<Arc<dyn ChatAdapter>>,
     pub allow_bot_messages: AllowBots,
     pub trusted_bot_ids: HashSet<u64>,
@@ -603,6 +604,30 @@ impl EventHandler for Handler {
             ).await {
                 debug!(url = %attachment.url, filename = %attachment.filename, "adding image attachment");
                 extra_blocks.push(block);
+            }
+        }
+
+        // Apple Podcast link → inject transcript + summary instruction, mirroring
+        // the voice-transcript path above. The agent produces the summary.
+        if self.podcast_config.enabled {
+            if let Some(m) = crate::podcast::APPLE_PODCAST_RE.find(&prompt) {
+                let url = m.as_str().to_string();
+                debug!(%url, "apple podcast link detected");
+                if let Some(result) = crate::podcast::fetch_transcript(
+                    &self.stt_config,
+                    &self.podcast_config,
+                    &url,
+                ).await {
+                    debug!(title = %result.title, chars = result.transcript.len(), "podcast transcript injected");
+                    extra_blocks.insert(0, ContentBlock::Text {
+                        text: format!(
+                            "[Podcast 摘要任務] 節目：{}\n{}\n\n逐字稿：\n{}",
+                            result.title, self.podcast_config.summary_prompt, result.transcript
+                        ),
+                    });
+                } else {
+                    debug!(%url, "podcast transcript unavailable");
+                }
             }
         }
 
