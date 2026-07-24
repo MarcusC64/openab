@@ -1,5 +1,7 @@
 # --- Build stage ---
-ARG BUILD_MODE=default
+# Zeabur deployment: default to `unified` so the Telegram webhook adapter is
+# compiled into the single openab binary (no separate gateway process needed).
+ARG BUILD_MODE=unified
 ARG FEATURES=""
 
 FROM rust:1-bookworm AS builder
@@ -29,7 +31,8 @@ RUN touch src/main.rs crates/openab-core/src/lib.rs crates/openab-gateway/src/li
 
 # --- Runtime stage ---
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl procps ripgrep tini unzip && rm -rf /var/lib/apt/lists/*
+# ffmpeg added for the podcast feature's chunked audio STT fallback.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg procps ripgrep tini unzip && rm -rf /var/lib/apt/lists/*
 
 # Install kiro-cli (auto-detect arch, copy binary directly)
 ARG KIRO_CLI_VERSION=2.13.0
@@ -61,10 +64,13 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 RUN useradd -m -s /bin/bash -u 1000 agent
 RUN mkdir -p /home/agent/.local/share/kiro-cli /home/agent/.kiro && \
     chown -R agent:agent /home/agent
+RUN mkdir -p /etc/openab && chown agent:agent /etc/openab
 ENV HOME=/home/agent
 WORKDIR /home/agent
 
 COPY --from=builder --chown=agent:agent /build/target/release/openab /usr/local/bin/openab
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 USER agent
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
@@ -72,5 +78,6 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 ENV OPENAB_AGENT_COMMAND="kiro-cli acp --trust-all-tools"
 ENV OPENAB_AGENT_AUTH_COMMAND="kiro-cli login --use-device-flow"
 
+# Zeabur: entrypoint generates /etc/openab/config.toml from env vars at startup.
 ENTRYPOINT ["tini", "--"]
-CMD ["openab", "run", "-c", "/etc/openab/config.toml"]
+CMD ["/usr/local/bin/docker-entrypoint.sh"]

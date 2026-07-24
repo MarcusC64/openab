@@ -495,7 +495,9 @@ pub async fn handle_reply(
                 "chat_id": reply.channel.id,
                 "message_id": reply.reply_to,
                 "text": &reply.content.text,
-                "parse_mode": "Markdown",
+                // parse_mode intentionally omitted: Markdown mode silently eats
+                // underscores (treats @some_bot as italic), mangling bot mentions.
+                // The rich-message path handles formatting with proper escaping.
             }))
             .send()
             .await;
@@ -608,7 +610,9 @@ pub async fn handle_reply(
                 "chat_id": reply.channel.id,
                 "text": chunk,
                 "message_thread_id": reply.channel.thread_id,
-                "parse_mode": "Markdown",
+                // parse_mode intentionally omitted: Markdown mode silently eats
+                // underscores (treats @some_bot as italic), mangling bot mentions.
+                // Complex markdown is handled by the rich-message path above.
             }))
             .send()
             .await;

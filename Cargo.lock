@@ -2192,7 +2192,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openab"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2235,6 +2235,7 @@ dependencies = [
  "image",
  "libc",
  "pulldown-cmark",
+ "quick-xml 0.36.2",
  "rand 0.8.6",
  "regex",
  "reqwest",
@@ -2277,7 +2278,7 @@ dependencies = [
  "jsonwebtoken",
  "parking_lot",
  "prost",
- "quick-xml",
+ "quick-xml 0.37.5",
  "reqwest",
  "serde",
  "serde_json",
@@ -2565,6 +2566,15 @@ name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+
+[[package]]
+name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "quick-xml"

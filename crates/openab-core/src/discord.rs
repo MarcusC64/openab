@@ -233,6 +233,8 @@ pub struct Handler {
     pub allowed_channels: HashSet<u64>,
     pub allowed_users: HashSet<u64>,
     pub stt_config: SttConfig,
+    /// Apple Podcast summarization config (reuses `stt_config` for transcription).
+    pub podcast_config: crate::config::PodcastConfig,
     pub adapter: OnceLock<Arc<dyn ChatAdapter>>,
     /// Optional filestore for uploading file attachments.
     #[cfg(feature = "filestore")]
@@ -1013,6 +1015,49 @@ impl EventHandler for Handler {
                             "image attachment failed"
                         );
                         failed_image_files.push(attachment.filename.clone());
+                    }
+                }
+            }
+        }
+
+        // Apple Podcast link → inject transcript + summary instruction, mirroring
+        // the voice-transcript path above. The agent produces the summary.
+        if self.podcast_config.enabled {
+            if let Some(m) = crate::podcast::APPLE_PODCAST_RE.find(&prompt) {
+                let url = m.as_str().to_string();
+                tracing::info!(%url, "apple podcast link detected");
+                match crate::podcast::fetch_transcript(
+                    &self.stt_config,
+                    &self.podcast_config,
+                    &url,
+                )
+                .await
+                {
+                    Some(result) => {
+                        tracing::info!(title = %result.title, chars = result.transcript.len(), "podcast transcript injected");
+                        extra_blocks.insert(
+                            0,
+                            ContentBlock::Text {
+                                text: format!(
+                                    "[Podcast 摘要任務] 節目：{}\n{}\n\n逐字稿：\n{}",
+                                    result.title, self.podcast_config.summary_prompt, result.transcript
+                                ),
+                            },
+                        );
+                    }
+                    None => {
+                        // Surface the failure instead of letting the agent
+                        // silently summarize the show-notes/description.
+                        tracing::warn!(%url, "podcast transcript unavailable — injecting failure note");
+                        extra_blocks.insert(
+                            0,
+                            ContentBlock::Text {
+                                text: "[Podcast] 無法取得這個連結的逐字稿（此節目可能沒有公開逐字稿，或音檔轉錄失敗）。\
+                                       請明確告訴使用者你沒有實際收聽內容，不要依節目簡介或章節標題臆測內容。".to_string(),
+                            },
+                        );
+                        let msg_ref = discord_msg_ref(&msg);
+                        let _ = adapter.add_reaction(&msg_ref, "⚠️").await;
                     }
                 }
             }

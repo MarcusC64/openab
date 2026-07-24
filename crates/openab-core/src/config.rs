@@ -187,6 +187,8 @@ pub struct Config {
     #[serde(default)]
     pub stt: SttConfig,
     #[serde(default)]
+    pub podcast: PodcastConfig,
+    #[serde(default)]
     pub markdown: MarkdownConfig,
     #[serde(default)]
     pub cron: CronConfig,
@@ -424,6 +426,52 @@ fn default_stt_base_url() -> String {
 }
 fn default_echo_transcript() -> bool {
     false
+}
+
+/// Apple Podcast summarization. When enabled, an `https://podcasts.apple.com/...`
+/// link in a message is resolved to its episode audio, transcribed (preferring
+/// the publisher's RSS transcript, falling back to ffmpeg-chunked STT), and the
+/// transcript plus a summary instruction is injected as text for the agent.
+/// Transcription reuses the `[stt]` provider config.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PodcastConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Cap on total audio minutes sent to STT in the chunked fallback path.
+    #[serde(default = "default_podcast_max_minutes")]
+    pub max_minutes: u32,
+    /// Instruction prepended to the transcript telling the agent how to
+    /// summarize. Default asks for a Traditional-Chinese TL;DR + bullet points.
+    #[serde(default = "default_podcast_summary_prompt")]
+    pub summary_prompt: String,
+    /// ffmpeg executable used to split long audio into <25MB chunks.
+    #[serde(default = "default_ffmpeg_path")]
+    pub ffmpeg_path: String,
+}
+
+impl Default for PodcastConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_minutes: default_podcast_max_minutes(),
+            summary_prompt: default_podcast_summary_prompt(),
+            ffmpeg_path: default_ffmpeg_path(),
+        }
+    }
+}
+
+fn default_podcast_max_minutes() -> u32 {
+    90
+}
+fn default_ffmpeg_path() -> String {
+    "ffmpeg".into()
+}
+fn default_podcast_summary_prompt() -> String {
+    "以下是一集 Podcast 的逐字稿。請用繁體中文輸出：\n\
+     1) 開頭一句 TL;DR 總結整集主旨；\n\
+     2) 接著 3~7 條條列重點，每條一行、聚焦聽眾可帶走的資訊；\n\
+     3) 若提到具體人名、數據或結論請保留。不要逐句翻譯，只萃取重點。"
+        .into()
 }
 
 #[derive(Debug, Deserialize)]

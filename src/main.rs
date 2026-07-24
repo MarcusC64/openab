@@ -403,6 +403,25 @@ async fn main() -> anyhow::Result<()> {
         info!(model = %cfg.stt.model, base_url = %cfg.stt.base_url, "STT enabled");
     }
 
+    // Podcast summarization reuses the [stt] provider for its STT fallback.
+    if cfg.podcast.enabled {
+        if cfg.stt.api_key.is_empty() {
+            info!("podcast enabled without an [stt] api_key — only RSS-embedded transcripts will work (no audio fallback)");
+        }
+        match tokio::process::Command::new(&cfg.podcast.ffmpeg_path)
+            .arg("-version")
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {
+                info!(ffmpeg = %cfg.podcast.ffmpeg_path, max_minutes = cfg.podcast.max_minutes, "podcast enabled");
+            }
+            _ => {
+                warn!(ffmpeg = %cfg.podcast.ffmpeg_path, "podcast enabled but ffmpeg not found — audio STT fallback will be skipped (RSS transcripts still work)");
+            }
+        }
+    }
+
     // Build the per-platform trust registry for the gateway platforms from the
     // same GATEWAY_* env the unified bridge uses (behavior-preserving: defaults
     // allow-all, matching today's should_skip_event). L2/L3 enforcement moves to
@@ -1415,6 +1434,7 @@ async fn main() -> anyhow::Result<()> {
             allowed_channels,
             allowed_users,
             stt_config: cfg.stt.clone(),
+            podcast_config: cfg.podcast.clone(),
             adapter: std::sync::OnceLock::new(),
             #[cfg(feature = "filestore")]
             filestore: filestore.clone(),
@@ -1531,6 +1551,9 @@ async fn main() -> anyhow::Result<()> {
 fn parse_id_set(raw: &[String], label: &str) -> anyhow::Result<HashSet<u64>> {
     let set: HashSet<u64> = raw
         .iter()
+        .flat_map(|s| s.split(','))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
         .filter_map(|s| match s.parse() {
             Ok(id) => Some(id),
             Err(_) => {
