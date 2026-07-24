@@ -38,28 +38,46 @@ helm install openab openab/openab \
   --set agents.opencode.enabled=true \
   --set agents.opencode.command=opencode \
   --set 'agents.opencode.args={acp}' \
-  --set agents.opencode.image=ghcr.io/openabdev/openab-opencode:latest \
   --set agents.opencode.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.opencode.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
   --set agents.opencode.workingDir=/home/node \
-  --set agents.opencode.pool.maxSessions=3
+  --set agents.opencode.pool.maxSessions=3 \
+  --set image.tag=beta
 ```
 
 > Set `agents.kiro.enabled=false` to disable the default Kiro agent.
+
+### Image Tag
+
+Use `--set image.tag=<version>` to set the image version globally.
+The chart auto-appends `-<agent>` to produce the final tag (see [image-tags.md](image-tags.md) for full details).
+
+| Tag | Resolves to | Description |
+|-----|-------------|-------------|
+| `beta` | `beta-opencode` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2` | `0.9.0-beta.2-opencode` | Pinned to exact version |
+| `0.9` | `0.9-opencode` | Latest patch in minor (floating) |
+| `stable` | `stable-opencode` | Floating stable channel |
+
+To override a single agent's image instead of the global tag:
+```bash
+--set agents.opencode.image=ghcr.io/openabdev/openab:beta-opencode
+```
+
+> ⚠️ There is no `latest` tag. Use `beta` or `stable`, or pin to an exact version.
 
 ## Manual config.toml
 
 ```toml
 [agent]
-command = "opencode"
-args = ["acp"]
-working_dir = "/home/node"
+# command and args default from OPENAB_AGENT_COMMAND="opencode acp"
+# Only override if you need non-default behavior
 ```
 
 ## Authentication
 
 ```bash
-kubectl exec -it deployment/openab-opencode -- opencode auth login
+kubectl exec -it deployment/openab-opencode -- sh -c "$OPENAB_AGENT_AUTH_COMMAND"
 ```
 
 Follow the browser OAuth flow, then restart the pod:
@@ -81,6 +99,12 @@ To list all available models across configured providers:
 ```bash
 kubectl exec deployment/openab-opencode -- opencode models
 ```
+
+## Local OpenAI-Compatible Vision Models
+
+OpenAB can pass inbound image attachments to OpenCode as ACP image content blocks, but OpenCode must also select a model whose metadata declares image input support. For custom providers, that means `modalities.input: ["text", "image"]` in `opencode.json`.
+
+See [Local OpenAI-Compatible Vision Models](local-vision-models.md#opencode-configuration) for the `llama-server` setup, `opencode.json` example, and local vision pitfalls.
 
 ## Example: Ollama Cloud with gemini-3-flash-preview
 
@@ -116,8 +140,108 @@ kubectl logs deployment/openab-opencode --tail=5
 
 `@mention` the bot in your Discord channel to start chatting.
 
+## Example: xAI Grok with SuperGrok OAuth
+
+### 1. Create the auth directory
+
+OpenCode stores credentials at `~/.local/share/opencode/auth.json`. The directory must exist before login:
+
+```bash
+kubectl exec deployment/openab-opencode -- mkdir -p /home/node/.local/share/opencode
+```
+
+### 2. Authenticate xAI (device-code flow)
+
+```bash
+kubectl exec -it deployment/openab-opencode -- opencode auth login -p xai
+```
+
+Select **"xAI Grok OAuth (Headless / Remote / VPS)"**. The CLI prints a URL and a short code:
+
+```
+Open https://x.ai/device on any device and enter code: ABCD-1234
+```
+
+Open the URL on any device with a browser, enter the code, and approve.
+
+### 3. Verify auth file was created
+
+```bash
+kubectl exec deployment/openab-opencode -- cat /home/node/.local/share/opencode/auth.json
+```
+
+You should see a JSON object with `xai` credentials.
+
+### 4. Set default model
+
+Create `opencode.json` in the working directory (`/home/node`):
+
+```bash
+kubectl exec -it deployment/openab-opencode -- bash -c 'cat > /home/node/opencode.json << "EOF"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "xai/grok-4.3"
+}
+EOF'
+```
+
+### 5. Restart to pick up config
+
+```bash
+kubectl rollout restart deployment/openab-opencode
+```
+
+> **Important:** Do NOT set a custom `baseURL` or provider override for xAI. The built-in xAI provider handles routing correctly. A stale `~/.config/opencode/opencode.json` with `baseURL: "http://localhost:9090/v1"` (from xai-proxy setups) will break xAI — delete it if present.
+
+## Example: API Key Providers
+
+For providers that use API keys instead of OAuth (e.g. opencode-go, custom
+OpenAI-compatible endpoints), the config needs the full `provider` block with
+`options.apiKey`:
+
+### 1. Set the model and API key
+
+Create `opencode.json` in the working directory (`/home/node`). The key
+difference from OAuth providers is the `provider.options.apiKey` field:
+
+```bash
+kubectl exec -it deployment/openab-opencode -- bash -c 'cat > /home/node/opencode.json << EOF
+{
+  "provider": {
+    "opencode-go": {
+      "options": {
+        "baseURL": "https://opencode.ai/zen/go/v1",
+        "apiKey": "{env:OPENCODE_API_KEY}"
+      },
+      "models": {
+        "deepseek-v4-flash": {}
+      }
+    }
+  },
+  "model": "opencode-go/deepseek-v4-flash"
+}
+EOF'
+```
+
+> Inject `OPENCODE_API_KEY` via a Kubernetes Secret as an environment variable.
+>
+> Note: shell-style `${OPENCODE_API_KEY}` would also work in this specific
+> heredoc (bash expands it before writing), but only here. `{env:VAR}` is the
+> form that works everywhere.
+>
+> See the [opencode env var docs](https://opencode.ai/docs/config/#env-vars)
+> for the full `{env:VAR}` syntax and provider block schema.
+
+
+### 2. Restart to pick up config
+
+```bash
+kubectl rollout restart deployment/openab-opencode
+```
+
 ## Notes
 
 - **Tool authorization**: OpenCode handles tool authorization internally and never emits `session/request_permission` — all tools run without user confirmation, equivalent to `--trust-all-tools` on other backends.
 - **Model selection**: Set the default model via `opencode.json` in the working directory using the `provider/model` format (e.g. `ollama-cloud/gemini-3-flash-preview`).
 - **Frequent releases**: OpenCode releases very frequently (often daily). The pinned version in `Dockerfile.opencode` should be bumped via a dedicated PR when an update is needed.
+- **Minimum version for OpenRouter reasoning models**: Use `opencode-ai >= 1.17.3`. OpenCode 1.16.x (and likely earlier) ships an ACP regression where OpenRouter reasoning models — e.g. `openrouter/google/gemini-3-flash` — produce a complete assistant `text` part in OpenCode's internal session storage (visible via `opencode export <session_id>`) but the ACP server never emits a corresponding `agent_message_chunk` notification. OpenAB's ACP loop then sees only `usage_update` + a final `stopReason: end_turn` and renders `(no response)` because there is no message content to display. Fixed upstream by [sst/opencode#30332](https://github.com/sst/opencode/pull/30332) ("generate reasoning variants for all OpenRouter models"), released in OpenCode 1.17.0.

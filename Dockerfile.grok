@@ -1,0 +1,69 @@
+# --- Build stage ---
+FROM rust:1-bookworm AS builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates/openab-core/Cargo.toml crates/openab-core/Cargo.toml
+COPY crates/openab-gateway/Cargo.toml crates/openab-gateway/Cargo.toml
+RUN mkdir -p src crates/openab-core/src crates/openab-gateway/src \
+    && echo 'fn main() {}' > src/main.rs \
+    && echo '' > crates/openab-core/src/lib.rs \
+    && echo '' > crates/openab-gateway/src/lib.rs \
+    && cargo build --release \
+    && rm -rf src crates/openab-core/src crates/openab-gateway/src
+COPY crates/ crates/
+COPY src/ src/
+RUN touch src/main.rs crates/openab-core/src/lib.rs crates/openab-gateway/src/lib.rs && cargo build --release
+
+# --- Runtime stage ---
+FROM debian:trixie-slim
+
+# Create agent user first so WORKDIR gets correct ownership
+RUN useradd -m -u 1000 agent
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl procps ripgrep tini git unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Grok Build CLI — pinned version with SHA256 checksum verification.
+# Binary sourced from xAI's public artifacts bucket (same source the official
+# `https://x.ai/cli/install.sh` resolves to) so the build is reproducible.
+ARG GROK_VERSION=0.2.106
+ARG GROK_SHA256_AMD64=7180d0e03cc2a496033ff3aae2223ce239446a9827a59faa76091c7edd5e1c38
+ARG GROK_SHA256_ARM64=d12be1698d56d4543f1f1095c2c26cd3d17a64e88772629673740991c188e4ff
+ARG TARGETPLATFORM
+RUN set -eux; \
+    case "${TARGETPLATFORM:-linux/amd64}" in \
+      "linux/amd64") arch=x86_64; sha="${GROK_SHA256_AMD64}" ;; \
+      "linux/arm64") arch=aarch64; sha="${GROK_SHA256_ARM64}" ;; \
+      *) echo "Unsupported platform: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-${GROK_VERSION}-linux-${arch}" \
+      -o /tmp/grok && \
+    echo "${sha}  /tmp/grok" | sha256sum -c - && \
+    install -m 0755 /tmp/grok /usr/local/bin/grok && \
+    rm /tmp/grok
+
+# Install gh CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV HOME=/home/agent
+WORKDIR /home/agent
+
+COPY --from=builder --chown=1000:1000 /build/target/release/openab /usr/local/bin/openab
+
+# Pre-create credential dir so a PVC mounted at ~/.grok inherits correct ownership
+RUN mkdir -p /home/agent/.grok && chown -R agent:agent /home/agent
+
+USER agent
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD pgrep -x openab || exit 1
+ENV OPENAB_AGENT_COMMAND="grok agent stdio"
+ENV OPENAB_AGENT_AUTH_COMMAND="grok login --device-auth"
+
+ENTRYPOINT ["tini", "--"]
+CMD ["openab", "run", "-c", "/etc/openab/config.toml"]

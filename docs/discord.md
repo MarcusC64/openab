@@ -69,7 +69,7 @@ bot_token = "${DISCORD_BOT_TOKEN}"
 allowed_channels = ["123456789"]      # channel ID allowlist (empty = all)
 allowed_users = ["987654321"]         # user ID allowlist (empty = all)
 allow_bot_messages = "off"            # off | mentions | all
-allow_user_messages = "involved"      # involved | mentions
+allow_user_messages = "multibot-mentions"      # multibot-mentions | involved | mentions
 trusted_bot_ids = []                  # bot user IDs allowed through (empty = any)
 ```
 
@@ -103,9 +103,9 @@ Controls whether the bot requires @mention in threads.
 
 | Value | Behavior |
 |---|---|
-| `"involved"` (default) | Respond in threads the bot owns or has participated in without @mention. Main channel always requires @mention. |
+| `"involved"` | Respond in threads the bot owns or has participated in without @mention. Main channel always requires @mention. |
 | `"mentions"` | Always require @mention, even in the bot's own threads. |
-| `"multibot-mentions"` | Same as `involved` in single-bot threads. In threads where other bots have also posted, requires @mention — prevents all bots from responding to every message. |
+| `"multibot-mentions"` (default) | Same as `involved` in single-bot threads. In threads where other bots have also posted, requires @mention — prevents all bots from responding to every message. |
 
 #### Comparison
 
@@ -134,18 +134,55 @@ trusted_bot_ids = ["123456789012345678"]  # only this bot's messages pass throug
 
 Empty (default) = any bot can pass through (subject to the mode check).
 
+**Admission override:** A trusted bot that explicitly @mentions this bot bypasses the `allow_bot_messages` mode entirely — the mention is treated the same as a human @mention. This allows trusted bots to pull this bot into threads even when `allow_bot_messages = "off"`. Messages from trusted bots *without* @mention still follow normal gating.
+
+### `allowed_role_ids`
+
+Role IDs that trigger the bot, same as a direct @mention. This enables users to invoke multiple bots simultaneously with a single role mention (e.g. `@AllBots review this`).
+
+```toml
+allowed_role_ids = ["123456789012345678"]  # @mention this role = trigger the bot
+```
+
+Empty (default) = role mentions do not trigger the bot.
+
+**Setup:**
+1. Create a Discord role (e.g. `Bots` or `AllAgents`)
+2. Assign the role to all bots you want to trigger together
+3. Add the role's ID to each bot's `allowed_role_ids`
+4. Users type `@RoleName <prompt>` to trigger all bots at once
+
+> **Note:** If multiple bots share the same role, all will respond simultaneously. Use `multibot-mentions` mode if you want bots to require explicit @mention when other bots are already in the thread.
+
+#### Interaction with `multibot-mentions` mode
+
+When `allow_user_messages = "multibot-mentions"` is set alongside `allowed_role_ids`:
+
+| Action | Result |
+|--------|--------|
+| `@Role review this` in a channel | All bots trigger (role mention = explicit mention) |
+| Follow-up in the thread without @mention | Only the thread owner responds (multibot gate kicks in) |
+| `@Role follow up` in the thread | All bots respond again |
+
+This gives the best of both worlds: one role mention to summon all bots, but subsequent messages in the thread don't cause all bots to pile on.
+
 ---
 
 ## @Mention Behavior
 
-**Always @mention the bot user, not the role.** Discord shows both in autocomplete — pick the one without the role icon.
+The bot responds to:
+
+1. **Direct @mention** (`@BotUser`) — always works
+2. **Role mention** (`@RoleName`) — only if the role ID is in `allowed_role_ids`
+3. **Thread reply** — depends on `allow_user_messages` mode (no @mention needed in `involved` mode)
 
 ```
-✅ @AgentBroker hello     ← user mention, bot responds
-❌ @AgentBroker hello     ← role mention (with role icon), bot ignores
+✅ @AgentBroker hello           ← user mention, bot responds
+✅ @AllBots hello               ← role mention, bot responds (if role in allowed_role_ids)
+❌ @SomeOtherRole hello         ← role not in allowed_role_ids, bot ignores
 ```
 
-Role mentions are ignored because they are shared across bots and cause false positives in multi-bot setups. This is intentional since v0.7.8-beta.3 (#420, #440).
+The triggering role mention is stripped from the prompt sent to the agent (same as the bot's own user mention).
 
 ### User mention UIDs
 
@@ -153,7 +190,8 @@ When a user mentions another user (e.g. `@SomeUser`) in a message to the bot, th
 
 - The LLM can copy `<@UID>` into its reply to produce a clickable Discord mention
 - The bot's own mention is stripped (so the bot doesn't see itself being triggered)
-- Role mentions are replaced with `@(role)` placeholder
+- Triggering role mentions (in `allowed_role_ids`) are stripped
+- Other role mentions are replaced with `@(role)` placeholder
 
 To help the LLM know who each UID refers to, provide a UID→name mapping via system prompt or context entry (see [Multi-Bot Setup](#multi-bot-setup) below).
 
@@ -163,10 +201,61 @@ To help the LLM know who each UID refers to, provide a UID→name mapping via sy
 
 When you @mention the bot in a channel, it creates a **thread** from your message and responds there. After that:
 
-- **`involved` mode (default):** just type in the thread — no @mention needed
+- **`multibot-mentions` mode (default):** just type in single-bot threads — no @mention needed; in multi-bot threads, @mention required
+- **`involved` mode:** just type in the thread — no @mention needed
 - **`mentions` mode:** @mention required for every message, even in threads
 
 Each thread gets its own agent session. Sessions are cleaned up after `session_ttl_hours` (default: 24h).
+
+---
+
+## Ambient Mode
+
+Ambient mode allows the bot to passively listen to configured channels and respond only when it has something valuable to add — without requiring @mentions. See [ambient.md](ambient.md) for full details.
+
+```toml
+[ambient]
+enabled = true
+
+[ambient.discord]
+channels = ["1234567890"]   # Channel IDs to monitor (and their threads)
+```
+
+When enabled:
+- Non-mention messages in listed channels are buffered and periodically sent to the LLM as a batch.
+- If the LLM has nothing to add, it returns `[NO_REPLY]` (silently suppressed).
+- **@mention always takes priority** — the ambient buffer is discarded and the mention gets an immediate response.
+
+---
+
+## Attachment Handling
+
+OpenAB processes Discord file attachments and converts them into content blocks
+for the agent. Supported types (checked in order):
+
+| Type | Detection | Agent receives |
+|------|-----------|----------------|
+| Audio | MIME `audio/*` | Transcribed text via STT (if enabled) |
+| Text files | Extension list (`.txt`, `.md`, `.json`, etc.) | File content inlined (up to 5 files, 1 MB total) |
+| Images | MIME `image/*` or image extensions | Base64-encoded image block |
+| Video | MIME `video/*` or extensions (`.mp4`, `.mov`, `.webm`, `.mkv`, `.m4v`, `.avi`) | Text block with filename, content type, size, and Discord CDN URL |
+
+Unsupported attachment types are silently ignored.
+
+### Video attachments
+
+Video files are not downloaded or transcoded. The agent receives metadata and the
+Discord CDN URL so it can fetch or inspect the file using tools like `ffprobe`.
+
+```
+[Video attachment]
+filename: demo.mp4
+content_type: video/mp4
+size_bytes: 8421376
+url: https://cdn.discordapp.com/attachments/.../demo.mp4
+```
+
+No configuration is needed — video forwarding is always enabled.
 
 ---
 
@@ -207,7 +296,33 @@ helm install openab openab/openab \
 ### Known limitations
 
 - **One thread per message:** when you @mention both bots in a single message, only the first bot creates a thread. The second bot's thread creation fails and the message is dropped. Workaround: @mention each bot in separate messages.
-- **Thread ownership:** a bot only responds in threads it owns or has participated in (`involved` mode). To have Bot B respond in Bot A's thread, use `mentions` mode and explicitly @mention Bot B.
+- **Thread ownership (involvement gate):** a bot only responds in threads it owns or has participated in. See the Involvement Gate section below for full details.
+
+### Involvement Gate
+
+In a multi-bot setup, every bot enforces an **involvement gate** before processing any message in a thread. This gate is evaluated before `allow_user_messages` or `allow_bot_messages` mode checks.
+
+**Rule:** A bot must be **involved** (thread owner or has previously replied) before it will process any message in that thread.
+
+**Key constraint:** Only a human @mention — or a @mention from a bot in `trusted_bot_ids` — can pull a bot into a thread for the first time. A @mention from an untrusted bot will be **silently dropped**.
+
+```
+Bot A's thread (Bot B not yet involved, Bot A NOT in Bot B's trusted_bot_ids):
+
+  Bot A: "@Bot_B please review this"     → ❌ dropped (Bot B not involved, Bot A untrusted)
+  Human: "@Bot_B please review this"     → ✅ Bot B replies, now involved
+  Bot A: "@Bot_B any updates?"           → ✅ processed (Bot B is involved)
+
+Bot A's thread (Bot B not yet involved, Bot A IS in Bot B's trusted_bot_ids):
+
+  Bot A: "@Bot_B please review this"     → ✅ treated as human @mention, Bot B becomes involved
+```
+
+**Why:** This prevents untrusted bots from pulling other bots into arbitrary threads without human consent, protects session pool resources, and eliminates cross-thread chain reactions. Trusted bots are explicitly authorized by the admin.
+
+**Workaround (without trusted_bot_ids):** Pre-involve all needed bots at thread creation by @mentioning them (or using a shared role via `allowed_role_ids`).
+
+> 📖 Full design details: [docs/messaging.md — Involvement Gate](messaging.md#involvement-gate)
 
 ### Recommended: `multibot-mentions` mode
 
@@ -274,10 +389,11 @@ helm install openab openab/openab \
   --set agents.kiro.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.kiro.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
   --set agents.kiro.discord.allowBotMessages=off \
-  --set agents.kiro.discord.allowUserMessages=involved
+  --set agents.kiro.discord.allowUserMessages=involved \
+  --set-string 'agents.kiro.discord.allowedRoleIds[0]=YOUR_ROLE_ID'
 ```
 
-⚠️ Use `--set-string` for channel/user IDs to avoid float64 precision loss.
+⚠️ Use `--set-string` for channel/user/role IDs to avoid float64 precision loss.
 
 ---
 
@@ -288,7 +404,7 @@ helm install openab openab/openab \
 1. **Check channel ID** — make sure it's in `allowed_channels`
 2. **Check permissions** — bot needs Send Messages, Create Public Threads, Read Message History in the channel
 3. **Check intents** — Message Content Intent must be enabled in Developer Portal
-4. **Check @mention type** — use user mention, not role mention
+4. **Check @mention type** — use user mention or a role in `allowed_role_ids`
 5. **Check if in a thread** — with `mentions` mode, @mention is required even in threads
 
 ### Bot stops receiving messages after restart
@@ -314,6 +430,6 @@ The bot token is wrong or expired. Reset it in the Developer Portal and redeploy
 The agent CLI isn't authenticated. For kiro-cli:
 
 ```bash
-kubectl exec -it deployment/openab-kiro -- kiro-cli login --use-device-flow
+kubectl exec -it deployment/openab-kiro -- sh -c "$OPENAB_AGENT_AUTH_COMMAND"
 kubectl rollout restart deployment/openab-kiro
 ```

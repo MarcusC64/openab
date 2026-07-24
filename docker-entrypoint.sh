@@ -4,15 +4,12 @@ set -e
 CONFIG=/etc/openab/config.toml
 mkdir -p /etc/openab
 
-# Start embedded gateway if Telegram is configured
+# Unified build: the Telegram webhook adapter is compiled into the openab
+# binary and auto-activates when TELEGRAM_BOT_TOKEN is set. The embedded HTTP
+# server listens on GATEWAY_LISTEN (default 0.0.0.0:8080) and serves the
+# webhook at /webhook/telegram — no separate gateway process required.
 if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
-    GATEWAY_LISTEN=0.0.0.0:8080 \
-    TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
-    TELEGRAM_SECRET_TOKEN="$TELEGRAM_SECRET_TOKEN" \
-    GATEWAY_WS_TOKEN="$GATEWAY_WS_TOKEN" \
-    openab-gateway &
-
-    GATEWAY_WS_URL="ws://127.0.0.1:8080/ws"
+    export GATEWAY_LISTEN="${GATEWAY_LISTEN:-0.0.0.0:8080}"
 fi
 
 cat > "$CONFIG" << EOF
@@ -43,17 +40,6 @@ session_ttl_hours = ${OPENAB_SESSION_TTL_HOURS:-24}
 enabled = true
 remove_after_reply = false
 EOF
-
-if [ -n "$GATEWAY_WS_URL" ]; then
-    cat >> "$CONFIG" << EOF
-
-[gateway]
-url = "${GATEWAY_WS_URL}"
-platform = "${GATEWAY_PLATFORM:-telegram}"
-token = "${GATEWAY_WS_TOKEN}"
-bot_username = "${TELEGRAM_BOT_USERNAME}"
-EOF
-fi
 
 if [ -n "$GROQ_API_KEY" ]; then
     cat >> "$CONFIG" << EOF

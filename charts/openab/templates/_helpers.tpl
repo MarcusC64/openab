@@ -45,9 +45,22 @@ app.kubernetes.io/component: {{ .agent }}
 {{- end }}
 {{- end }}
 
-{{/* Resolve image: agent-level string override → global default (repository:tag, tag defaults to appVersion).
-    Caveat: "contains :" treats registry ports (e.g. my-registry:5000/img) as tagged.
-    Not an issue for ghcr.io / Docker Hub; revisit if custom registries with ports are needed. */}}
+{{/* Secret name to use for Slack credentials.
+     If existingSecret is set, reference it; otherwise fall back to the chart-managed agent secret.
+     Call with: dict "ctx" $ "agent" $name "cfg" $cfg */}}
+{{- define "openab.slackSecretName" -}}
+{{- if and .cfg.slack (.cfg.slack.existingSecret | default "" | trim) -}}
+{{- .cfg.slack.existingSecret | trim -}}
+{{- else -}}
+{{- include "openab.agentFullname" . -}}
+{{- end -}}
+{{- end }}
+
+{{/* Resolve image: agent-level string override → unified default (repository:<tag>-<agent>).
+    All agents use the same format: ghcr.io/openabdev/openab:<tag>-<agent>
+    There is no "default" agent — every agent must be explicitly identified in the tag.
+    Per-agent image override (string with ":") is used verbatim for full backward compat.
+    Call with: dict "ctx" $ "agent" $name "cfg" $cfg */}}
 {{- define "openab.agentImage" -}}
 {{- if and .cfg.image (kindIs "string" .cfg.image) (ne .cfg.image "") }}
 {{- if contains ":" .cfg.image }}
@@ -57,7 +70,7 @@ app.kubernetes.io/component: {{ .agent }}
 {{- end }}
 {{- else }}
 {{- $tag := default .ctx.Chart.AppVersion .ctx.Values.image.tag }}
-{{- printf "%s:%s" .ctx.Values.image.repository $tag }}
+{{- printf "%s:%s-%s" .ctx.Values.image.repository $tag .agent }}
 {{- end }}
 {{- end }}
 

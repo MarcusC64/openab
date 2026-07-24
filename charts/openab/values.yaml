@@ -4,6 +4,30 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
+# Chart-level name override used in generated resource names.
+# For per-agent overrides, use agents.<name>.nameOverride.
+nameOverride: ""
+
+# Override the full release name used in generated resource names.
+fullnameOverride: ""
+
+# Chart-global ServiceAccount name for agent pods, used when an agent doesn't
+# set its own `serviceAccountName`. Empty string = use cluster default SA.
+# Per-agent values (agents.<name>.serviceAccountName) take precedence — when
+# set, they fully override this. The chart only references an existing SA; it
+# does NOT create one or manage annotations (provision out-of-band).
+# Example:
+# serviceAccountName: "openab"
+serviceAccountName: ""
+
+# Chart-global image pull secrets, used when an agent doesn't set its own
+# `imagePullSecrets`. Per-agent values (agents.<name>.imagePullSecrets) take
+# precedence — when set, they fully override (do not merge with) this list.
+# Example:
+# imagePullSecrets:
+#   - name: regcred
+imagePullSecrets: []
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
@@ -37,6 +61,8 @@ agents:
     #     allowBotMessages: "off"
     #     # trustedBotIds: []  # empty = any bot (mode permitting)
     #     trustedBotIds: []
+    #     # allowedRoleIds: []  # role IDs that trigger the bot
+    #     allowedRoleIds: []
     #   workingDir: /home/agent
     #   # nameOverride: custom deployment name (default: <release>-<agentKey>)
     #   nameOverride: ""
@@ -62,6 +88,28 @@ agents:
     #     existingClaim: ""  # set to reuse an existing PVC (skips PVC creation)
     #     storageClass: ""
     #     size: 1Gi
+    #   # configToml: provide a raw config.toml string instead of using the Helm-rendered template.
+    #   # The content is mounted verbatim — no field mapping, no validation. Secrets must still be
+    #   # injected via secretEnv (they render as env vars and are referenced as ${VAR} in the TOML).
+    #   # When set, all adapter fields (slack.*, discord.*, pool.*, etc.) are ignored for rendering.
+    #   # Can be set inline (below) or loaded as-is from a standalone file (WYSIWYG editing, full
+    #   # TOML syntax highlighting/schema validation in your editor) via:
+    #   #   helm upgrade ... --set-file agents.<name>.configToml=./config.toml
+    #   # Example:
+    #   # configToml: |
+    #   #   [slack]
+    #   #   bot_token = "${SLACK_BOT_TOKEN}"
+    #   #   allowed_channels = ["C01234567"]
+    #   #   allow_user_messages = "mentions"
+    #   #
+    #   #   [agent]
+    #   #   command = "claude-agent-acp"
+    #   #   inherit_env = ["ANTHROPIC_API_KEY"]
+    #   #
+    #   #   [pool]
+    #   #   max_sessions = 10
+    #   #   session_ttl_hours = 24
+    #   configToml: ""
     #   # ⚠️ When set, this ConfigMap mount shadows any file at the same path on the PVC.
     #   # The PVC file is NOT deleted but becomes invisible to the agent. Remove agentsMd to restore.
     #   agentsMd: ""
@@ -69,7 +117,7 @@ agents:
     #   nodeSelector: {}
     #   tolerations: []
     #   affinity: {}
-    #   image: "ghcr.io/openabdev/openab-claude"  # tag omitted → auto-appends appVersion
+    #   image: ""  # leave empty → auto-resolves to openab:<tag>-claude (unified format)
     # opencode:
     #   command: opencode
     #   args:
@@ -99,7 +147,60 @@ agents:
     #     size: 1Gi
     #   agentsMd: ""
     #   resources: {}
-    #   image: "ghcr.io/openabdev/openab-opencode:latest"
+    #   image: ""  # leave empty → auto-resolves to openab:<tag>-opencode
+    # kimi:
+    #   command: kimi
+    #   args:
+    #     - acp
+    #   discord:
+    #     enabled: true
+    #     allowedChannels:
+    #       - "YOUR_CHANNEL_ID"
+    #     allowedUsers: []
+    #     allowBotMessages: "off"
+    #     trustedBotIds: []
+    #   workingDir: /home/node
+    #   env: {}
+    #   envFrom: []
+    #   secretEnv: []
+    #   pool:
+    #     maxSessions: 10
+    #     sessionTtlHours: 24
+    #   reactions:
+    #     enabled: true
+    #     removeAfterReply: false
+    #   persistence:
+    #     enabled: true
+    #     storageClass: ""
+    #     size: 1Gi
+    #   image: ""  # leave empty → auto-resolves to openab:<tag>-kimi
+    # pi:
+    #   command: pi-acp
+    #   discord:
+    #     enabled: true
+    #     allowedChannels:
+    #       - "YOUR_CHANNEL_ID"
+    #     allowedUsers: []
+    #   workingDir: /home/node
+    #   env: {}
+    #   envFrom: []
+    #   secretEnv: []
+    #   pool:
+    #     maxSessions: 10
+    #     sessionTtlHours: 24
+    #   reactions:
+    #     enabled: true
+    #     removeAfterReply: false
+    #   # workspace.aliases: map alias names to paths for [[ws:@alias]] directives
+    #   workspace:
+    #     aliases:
+    #       myproject: "~/projects/myproject"
+    #       openab: "~/openab"
+    #   persistence:
+    #     enabled: true
+    #     storageClass: ""
+    #     size: 1Gi
+    #   image: ""  # leave empty → auto-resolves to openab:<tag>-pi
     # cursor:
     #   command: cursor-agent
     #   args:
@@ -115,6 +216,7 @@ agents:
     #     allowedUsers: []
     #   workingDir: /home/agent
     #   env: {}
+    #   # Load env vars from existing Secrets or ConfigMaps, e.g. GH_TOKEN.
     #   envFrom: []
     #   secretEnv: []
     #   pool:
@@ -129,8 +231,64 @@ agents:
     #     existingClaim: ""  # set to reuse an existing PVC (skips PVC creation)
     #     storageClass: ""
     #     size: 1Gi
-    #   image: "ghcr.io/openabdev/openab-cursor:latest"
+    #   image: ""  # leave empty → auto-resolves to openab:<tag>-cursor
+    # hermes:
+    #   command: hermes-acp
+    #   discord:
+    #     enabled: true
+    #     allowedChannels:
+    #       - "YOUR_CHANNEL_ID"
+    #     allowedUsers: []
+    #     allowBotMessages: "off"
+    #     trustedBotIds: []
+    #   workingDir: /home/agent
+    #   env: {}
+    #   envFrom: []
+    #   secretEnv: []
+    #   pool:
+    #     maxSessions: 10
+    #     sessionTtlHours: 24
+    #   persistence:
+    #     enabled: true
+    #     storageClass: ""
+    #     size: 1Gi
+    #   image: ""  # leave empty → auto-resolves to openab:<tag>-hermes
+    # grok:
+    #   command: grok
+    #   args:
+    #     - agent
+    #     - stdio
+    #   # See docs/grok.md for the three authentication methods:
+    #   # 1. API key (recommended for bots): set GROK_CODE_XAI_API_KEY via env or secretEnv
+    #   # 2. Device-code OAuth: kubectl exec + `grok login --device-auth` (requires persistence)
+    #   # 3. Enterprise deployment key: GROK_DEPLOYMENT_KEY
+    #   discord:
+    #     enabled: true
+    #     allowedChannels:
+    #       - "YOUR_CHANNEL_ID"
+    #     allowedUsers: []
+    #     allowBotMessages: "off"
+    #     trustedBotIds: []
+    #   workingDir: /home/agent
+    #   env: {}
+    #   envFrom: []
+    #   secretEnv: []
+    #   pool:
+    #     maxSessions: 10
+    #     sessionTtlHours: 24
+    #   persistence:
+    #     enabled: true
+    #     storageClass: ""
+    #     size: 1Gi
+    #   image: ""  # leave empty → auto-resolves to openab:<tag>-grok
     image: ""
+    # configUrl: when set, openab uses `-c <URL>` to fetch config remotely
+    # instead of mounting the chart-generated ConfigMap. The ConfigMap and its
+    # volume mount are skipped entirely. Use for externally managed configs.
+    # ⚠️ When configUrl is set, agentsMd has no effect (no ConfigMap to mount from).
+    # Provision AGENTS.md via the PVC, extraVolumes, or include it in the remote config.
+    # Example: "https://raw.githubusercontent.com/myorg/config/main/openab.toml"
+    configUrl: ""
     command: kiro-cli
     args:
       - acp
@@ -155,6 +313,11 @@ agents:
       allowBotMessages: "off"
       # trustedBotIds: []  # empty = any bot (mode permitting); set to restrict
       trustedBotIds: []
+      # allowedRoleIds: Role IDs that trigger the bot (same as direct @mention).
+      # Create a Discord role, assign it to the bot, then users can @role to trigger.
+      # Empty (default) = role mentions do not trigger the bot.
+      # allowedRoleIds: ["1234567890123456789"]
+      allowedRoleIds: []
       # maxBotTurns: soft cap on consecutive bot turns per thread before
       # the bot stops auto-replying. A human message resets the counter.
       # Default 100 (Rust-side `default_max_bot_turns()`). Raise for long
@@ -174,6 +337,25 @@ agents:
       enabled: false
       botToken: ""       # Bot User OAuth Token (xoxb-...)
       appToken: ""       # App-Level Token (xapp-...) for Socket Mode
+      # Use a pre-existing K8s Secret for slack-bot-token and slack-app-token
+      # instead of having the chart create one from botToken/appToken.
+      # Set to the Secret name; the Secret must contain keys:
+      #   slack-bot-token  → Bot User OAuth Token (xoxb-...)
+      #   slack-app-token  → App-Level Token (xapp-...)
+      # When set, botToken and appToken above are ignored. Recommended path for
+      # External Secrets Operator / Vault / SealedSecrets deployments.
+      existingSecret: ""
+      # assistant_mode: native Slack streaming (chat.startStream) + assistant.threads.setStatus
+      # status line instead of post+edit + emoji reactions. Requires the Slack app to be an
+      # AI app with the `assistant:write` scope (plus chat:write). Default: true — set to
+      # false for non-AI Slack apps (without assistant:write) to keep emoji-reaction status.
+      assistantMode: true
+      # streaming: master switch for live reply streaming. Default true. Set
+      # false to always post a single final message (send-once) — no native
+      # streaming, no post+edit placeholder — regardless of assistantMode.
+      # Useful in multi-agent threads to avoid streamed-message edit states
+      # re-firing app_mention.
+      streaming: true
       # allowAllChannels/allowAllUsers: same auto-infer logic as discord
       allowedChannels: []  # empty + no allowAllChannels → allow all (auto-inferred)
       allowedUsers: []     # empty + no allowAllUsers → allow all (auto-inferred)
@@ -181,13 +363,13 @@ agents:
       allowBotMessages: "off"
       # trustedBotIds: Bot User IDs (U...) — find via Slack UI: click bot profile → Copy member ID
       trustedBotIds: []
-      # allowUserMessages: "involved" (default) | "mentions" | "multibot-mentions"
+      # allowUserMessages: "multibot-mentions" (default) | "involved" | "mentions"
       # "involved" = respond to thread follow-ups without @mention if bot has participated
       # "mentions" = always require @mention
       # "multibot-mentions" = same as "involved" in single-bot threads; require @mention
       #                      only when another bot has also posted in the thread
       #                      (recommended for multi-bot deployments)
-      allowUserMessages: "involved"
+      allowUserMessages: "multibot-mentions"
       # maxBotTurns: soft cap on consecutive bot turns per thread before
       # the bot stops auto-replying. A human message resets the counter.
       # Default 100 (Rust-side `default_max_bot_turns()`). Raise for long
@@ -205,6 +387,7 @@ agents:
       # maxBatchTokens: 24000
     workingDir: /home/agent
     env: {}
+    # Load env vars from existing Secrets or ConfigMaps, e.g. GH_TOKEN.
     envFrom: []
     secretEnv: []  # list of {name, secretName, secretKey} — rendered as valueFrom.secretKeyRef; keys auto-added to inherit_env
     pool:
@@ -217,11 +400,19 @@ agents:
       # compact: show count summary (e.g. ✅ 3 · 🔧 1 tool(s))
       # full: show complete tool titles (for debugging)
       # none: hide tool lines entirely
+      # narrationDisplay: default false. In send-once mode, deliver ONLY the final
+      # answer block (text after the last tool call); inter-tool narration is
+      # dropped. Set true to keep the full text. Platform-agnostic (Slack
+      # streaming=false, multi-bot threads, gateway). No effect while streaming.
+      # narrationDisplay: false
     stt:
       enabled: false
       apiKey: ""
       model: "whisper-large-v3-turbo"
       baseUrl: "https://api.groq.com/openai/v1"
+      # Echo the transcribed text back to the thread before the agent reply
+      # so users can verify STT accuracy. Default: false (opt-in).
+      echoTranscript: false
     gateway:
       enabled: false    # set to true + provide url to enable the [gateway] config block
       deploy: true      # set to false to skip Gateway Deployment/Service (config-only mode)
@@ -290,6 +481,17 @@ agents:
         saKeyJson: ""          # Service account key JSON string → GOOGLE_CHAT_SA_KEY_JSON (recommended, auto-refresh)
         accessToken: ""        # Static OAuth2 access token → GOOGLE_CHAT_ACCESS_TOKEN (fallback, 1-hour TTL)
         webhookPath: ""        # Gateway default: /webhook/googlechat → GOOGLE_CHAT_WEBHOOK_PATH
+      # WeCom (企业微信) adapter config (gateway-side env vars)
+      # See docs/wecom.md for full setup guide
+      wecom:
+        corpId: ""             # Enterprise Corp ID → WECOM_CORP_ID
+        secret: ""             # App Secret → WECOM_SECRET (use --set-literal or external secret mgmt)
+        token: ""              # Callback verification token → WECOM_TOKEN
+        encodingAesKey: ""     # 43-char AES key → WECOM_ENCODING_AES_KEY
+        agentId: ""            # Agent ID → WECOM_AGENT_ID (required)
+        webhookPath: ""        # Gateway default: /webhook/wecom → WECOM_WEBHOOK_PATH
+        streamingEnabled: ""   # Enable thinking-placeholder + recall streaming (causes brief client flicker) → WECOM_STREAMING_ENABLED. Default off.
+        debounceSecs: ""       # Debounce quiet-period seconds before flushing streamed text → WECOM_DEBOUNCE_SECS. Default 3, minimum 1 (0 is treated as unset by Helm).
     # Scheduled messages — config-driven cron (ADR: basic-cronjob)
     # Each entry sends a message to the agent at the specified schedule.
     # Example:
@@ -302,6 +504,22 @@ agents:
     #       senderName: "DailyOps"
     #       timezone: "Asia/Taipei"
     #       threadId: ""
+    # Lifecycle hooks — run custom scripts at container lifecycle events.
+    # See docs/hooks.md for full reference. Each hook supports exactly ONE of:
+    #   script (absolute path), inline (script content), or url + sha256.
+    # hooks:
+    #   preBoot:
+    #     timeoutSeconds: 120
+    #     onFailure: abort    # "abort" | "warn"
+    #     inline: |
+    #       #!/bin/sh
+    #       set -e
+    #       aws s3 sync "$BOOTSTRAP_URI" "$HOME/"
+    #   preShutdown:
+    #     timeoutSeconds: 30
+    #     onFailure: warn
+    #     script: /etc/openab/pre-shutdown.sh
+    hooks: {}
     cron:
       usercronEnabled: false
       usercronPath: ""
@@ -311,6 +529,7 @@ agents:
       existingClaim: ""  # set to reuse an existing PVC (skips PVC creation)
       storageClass: ""
       size: 1Gi  # defaults to 1Gi if not set
+    # Mount a custom AGENTS.md file. Useful with --set-file.
     # ⚠️ When set, this ConfigMap mount shadows any file at the same path on the PVC.
     # The PVC file is NOT deleted but becomes invisible to the agent. Remove agentsMd to restore.
     agentsMd: ""
@@ -318,6 +537,17 @@ agents:
     nodeSelector: {}
     tolerations: []
     affinity: {}
+    # Per-agent ServiceAccount name. When set (non-empty), overrides the
+    # chart-global `serviceAccountName` for this agent only. Useful in
+    # multi-agent deployments where only some agents need a dedicated SA.
+    # serviceAccountName: "openab"
+    serviceAccountName: ""
+    # Per-agent image pull secrets. When set, overrides the chart-global
+    # `imagePullSecrets` for this agent only. Useful in multi-agent deployments
+    # where only some agents pull from a private registry.
+    # imagePullSecrets:
+    #   - name: regcred
+    imagePullSecrets: []
     # extraInitContainers adds init containers to the pod (runs before the main container)
     extraInitContainers: []
     # extraContainers adds sidecar containers to the pod

@@ -22,9 +22,8 @@ OpenAB spawns `copilot --acp --stdio` as a child process and communicates via st
 
 ```toml
 [agent]
-command = "copilot"
-args = ["--acp", "--stdio"]
-working_dir = "/home/node"
+# command and args default from OPENAB_AGENT_COMMAND="copilot --acp --stdio"
+# Only override if you need non-default behavior
 ```
 
 ## Docker
@@ -60,7 +59,6 @@ helm install openab-copilot openab/openab \
   --set agents.copilot.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.copilot.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
   --set agents.copilot.discord.enabled=true \
-  --set agents.copilot.image=ghcr.io/openabdev/openab-copilot \
   --set agents.copilot.command=copilot \
   --set 'agents.copilot.args={--acp,--stdio}' \
   --set agents.copilot.persistence.enabled=true \
@@ -130,23 +128,51 @@ helm install openab-copilot openab/openab \
   --set agents.copilot.discord.enabled=true \
   --set agents.copilot.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.copilot.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
-  --set agents.copilot.image=ghcr.io/openabdev/openab-copilot \
   --set agents.copilot.command=copilot \
   --set 'agents.copilot.args={--acp,--stdio}' \
   --set agents.copilot.persistence.enabled=true \
   --set agents.copilot.workingDir=/home/node \
-  --set 'agents.copilot.env.COPILOT_GITHUB_TOKEN=github_pat_YOUR_TOKEN_HERE'  # optional, see Authentication
+  --set 'agents.copilot.env.COPILOT_GITHUB_TOKEN=github_pat_YOUR_TOKEN_HERE' \
+  --set image.tag=beta
 ```
+
+> `COPILOT_GITHUB_TOKEN` is optional — see Authentication section below.
+
+### Image Tag
+
+Use `--set image.tag=<version>` to set the image version globally.
+The chart auto-appends `-<agent>` to produce the final tag (see [image-tags.md](image-tags.md) for full details).
+
+| Tag | Resolves to | Description |
+|-----|-------------|-------------|
+| `beta` | `beta-copilot` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2` | `0.9.0-beta.2-copilot` | Pinned to exact version |
+| `0.9` | `0.9-copilot` | Latest patch in minor (floating) |
+| `stable` | `stable-copilot` | Floating stable channel |
+
+To override a single agent's image instead of the global tag:
+```bash
+--set agents.copilot.image=ghcr.io/openabdev/openab:beta-copilot
+```
+
+> ⚠️ There is no `latest` tag. Use `beta` or `stable`, or pin to an exact version.
 
 ## Model Selection
 
-Copilot CLI defaults to Claude Sonnet 4.6. Other available models include:
+The default model is defined in `~/.copilot/settings.json`.
 
-- Claude Opus 4.6, Claude Haiku 4.5 (Anthropic)
-- GPT-5.3-Codex (OpenAI)
-- Gemini 3 Pro (Google)
+To set `auto` as the default model, exec into the container and create the file:
 
-Model selection is controlled by Copilot CLI itself (via `/model` in interactive mode). In ACP mode, the default model is used.
+```bash
+kubectl exec -it deployment/openab-copilot-copilot -- bash -c '
+cat << EOF > ~/.copilot/settings.json
+{
+  "model": "auto"
+}
+EOF'
+```
+
+The `auto` setting lets Copilot automatically select the best model for each request. This persists across pod restarts when `persistence.enabled=true` (the home directory is on a PVC).
 
 ## Known Limitations
 

@@ -22,9 +22,8 @@ OpenAB spawns `cursor-agent acp` as a child process and communicates via stdio J
 
 ```toml
 [agent]
-command = "cursor-agent"
-args = ["acp"]
-working_dir = "/home/agent"
+# command and args default from OPENAB_AGENT_COMMAND="cursor-agent acp"
+# Only override if you need non-default behavior
 # Auth via: kubectl exec -it <pod> -- cursor-agent login
 ```
 
@@ -64,12 +63,31 @@ helm install openab openab/openab \
   --set agents.kiro.enabled=false \
   --set agents.cursor.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.cursor.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
-  --set agents.cursor.image=ghcr.io/openabdev/openab-cursor:latest \
   --set agents.cursor.command=cursor-agent \
   --set 'agents.cursor.args={acp}' \
   --set agents.cursor.persistence.enabled=true \
-  --set agents.cursor.workingDir=/home/agent
+  --set agents.cursor.workingDir=/home/agent \
+  --set image.tag=beta
 ```
+
+### Image Tag
+
+Use `--set image.tag=<version>` to set the image version globally.
+The chart auto-appends `-<agent>` to produce the final tag (see [image-tags.md](image-tags.md) for full details).
+
+| Tag | Resolves to | Description |
+|-----|-------------|-------------|
+| `beta` | `beta-cursor` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2` | `0.9.0-beta.2-cursor` | Pinned to exact version |
+| `0.9` | `0.9-cursor` | Latest patch in minor (floating) |
+| `stable` | `stable-cursor` | Floating stable channel |
+
+To override a single agent's image instead of the global tag:
+```bash
+--set agents.cursor.image=ghcr.io/openabdev/openab:beta-cursor
+```
+
+> ⚠️ There is no `latest` tag. Use `beta` or `stable`, or pin to an exact version.
 
 ## Model Selection
 
@@ -85,7 +103,7 @@ To specify a model, pass `--model` as an arg:
 
 ```toml
 [agent]
-command = "cursor-agent"
+# Override args (command defaults from OPENAB_AGENT_COMMAND="cursor-agent acp")
 args = ["acp", "--model", "auto"]
 ```
 
@@ -99,7 +117,7 @@ Cursor Agent CLI supports MCP servers configured via `.cursor/mcp.json` in the a
 
 ```toml
 [agent]
-command = "cursor-agent"
+# Override args (command defaults from OPENAB_AGENT_COMMAND="cursor-agent acp")
 args = ["acp", "--model", "auto", "--workspace", "/home/agent"]
 ```
 

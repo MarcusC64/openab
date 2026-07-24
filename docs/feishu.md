@@ -1,6 +1,53 @@
 # Feishu / Lark
 
+
+> **Unified Mode (v0.9.0+, WebSocket support v0.10.0+):** The OAB binary now embeds the feishu adapter directly. Set `FEISHU_APP_ID` as an env var — no separate gateway container or `[gateway]` config needed. See [Telegram docs](telegram.md#unified-mode-recommended) for the pattern.
+
+### Unified Config (Kiro + feishu)
+
+**Minimal:**
+
+```toml
+[agent]
+env = { KIRO_API_KEY = "${KIRO_API_KEY}" }
+```
+
+**Recommended:**
+
+```toml
+[agent]
+env = { KIRO_API_KEY = "${KIRO_API_KEY}" }
+
+[pool]
+max_sessions = 3
+session_ttl_hours = 1
+
+[reactions]
+tool_display = "compact"
+
+[markdown]
+tables = "off"
+```
+
+Set `FEISHU_APP_ID` (and related platform env vars) on the container. No `[gateway]` needed.
+
+
 Connect OpenAB to Feishu (China) or Lark (international) so users can chat with an AI agent in DMs or group chats.
+
+## `[feishu]` Section (config-first)
+
+Since #1377 all Feishu settings can live in a first-class `[feishu]` section — config-first with `FEISHU_*` env fallback:
+
+```toml
+[feishu]
+app_id     = "${FEISHU_APP_ID}"
+app_secret = "${FEISHU_APP_SECRET}"
+encrypt_key = "${FEISHU_ENCRYPT_KEY}"   # enables webhook signature verification (L1)
+connection_mode = "websocket"           # default; "webhook" for HTTP callback mode
+allowed_users = ["ou_xxxx"]             # open_id allowlist (note: open_id is per-app)
+```
+
+See [config-reference.md](config-reference.md#feishu) for the full field table.
 
 ## Prerequisites
 
@@ -80,8 +127,14 @@ https://your-gateway-host/webhook/feishu
 | — | `FEISHU_ALLOW_BOTS` | `off` | Bot message handling: `off` / `mentions` / `all` |
 | — | `FEISHU_TRUSTED_BOT_IDS` | — | Comma-separated open_id list of known bots |
 | — | `FEISHU_MAX_BOT_TURNS` | `20` | Max consecutive bot replies per channel before suppression |
+| — | `FEISHU_SESSION_TTL_HOURS` | `24` | How long the bot remembers thread participation (hours). After expiry, @mention is required again. |
+| — | `FEISHU_ALLOW_USER_MESSAGES` | `multibot-mentions` | Thread response mode: `multibot-mentions` / `involved` / `mentions`. See below. |
 | `gateway.botUsername` | — | — | Set to bot's `open_id` for @mention gating |
 | `gateway.streaming` | — | `false` | Enable streaming (typewriter) mode |
+| `cardStreaming.mode` | `FEISHU_CARD_STREAMING_MODE` | `auto` | Card streaming mode: `auto` (short→post, long/code/table→card), `card` (always card), `post` (disable — kill-switch) |
+| `cardStreaming.fallbackToPost` | `FEISHU_CARD_FALLBACK_TO_POST` | `true` | Fall back to a post message if a card API call fails |
+| `cardStreaming.promoteBytes` | `FEISHU_CARD_PROMOTE_BYTES` | `4000` | Byte threshold for auto-promoting a plain-text reply to a card |
+| `cardStreaming.idleFinalizeMs` | `FEISHU_CARD_IDLE_FINALIZE_MS` | `3000` | Idle window (ms) before a streaming card is finalized |
 
 ## @mention Gating
 
@@ -94,6 +147,32 @@ In group chats, the bot only responds when @mentioned (default). To find your bo
 2. Set `gateway.botUsername` to this value.
 
 To disable mention gating: `feishu.requireMention: false`.
+
+### Thread Participation (Involved Mode)
+
+Once the bot replies in a thread (topic), it remembers that thread and responds to subsequent messages **without requiring @mention** — similar to Discord's `allow_user_messages: "involved"` mode.
+
+- Only applies to threads (messages with `root_id`). Main channel messages always require @mention.
+- Participation is stored in memory. Gateway restart clears the cache; users need to @mention once to re-engage.
+- TTL controlled by `FEISHU_SESSION_TTL_HOURS` (default 24h). After expiry, @mention is required again.
+
+### Multi-Bot Threads (multibot-mentions Mode)
+
+When `FEISHU_ALLOW_USER_MESSAGES=multibot-mentions`, the bot detects when another bot is @mentioned in a participated thread and reverts to requiring @mention — preventing all bots from responding simultaneously.
+
+| Mode | Behavior |
+|------|----------|
+| `multibot-mentions` (default) | Like `involved`, but requires @mention once another bot has posted in the thread. |
+| `involved` | Bot responds in participated threads without @mention. All participated bots respond. |
+| `mentions` | Always require @mention, even in participated threads. |
+
+**Multi-bot detection** (how the gateway identifies "another bot"):
+
+1. If `FEISHU_TRUSTED_BOT_IDS` is set → exact match against configured IDs
+2. If only `FEISHU_ALLOWED_USERS` is set → any @mention that is not self and not in allowed_users is inferred as another bot (recommended, zero-config)
+3. If neither is set → no multibot detection
+
+Note: Detection only triggers in threads where the bot has already participated. This prevents premature marking of threads the bot hasn't joined.
 
 ## Security Notes
 
@@ -137,13 +216,14 @@ The gateway downloads and forwards image and text file attachments to the AI age
 | Feishu msg_type | Handling |
 |-----------------|----------|
 | `text` | Text extracted, forwarded as prompt |
-| `image` | Image downloaded, resized (max 1200px), JPEG compressed, base64 encoded → `ContentBlock::Image` |
+| `image` | Image downloaded, resized (max 1200px), JPEG compressed, stored to `~/.openab/media/inbound/<uuid>` → `ContentBlock::Image` |
 | `file` | Text files only (`.txt`, `.py`, `.rs`, `.md`, `.json`, etc., max 512KB). Non-text files (`.pdf`, `.zip`, etc.) are silently ignored. |
+| `audio` | Voice message downloaded (opus/ogg, max 25MB), stored to filesystem, forwarded to core. If `[stt]` is enabled, core transcribes via Whisper API and injects `[Voice message transcript]: ...` into the prompt. If STT is disabled or fails, the message is silently skipped. |
 | `post` | Rich text: text nodes extracted as prompt, `img` nodes downloaded as image attachments. This is the format Feishu uses when @mention + paste image in a group. |
 
 **Group chat limitation:** Feishu does not allow @mention and image upload in the same message. However, @mention + paste (Ctrl+V) an image works — Feishu sends this as a `post` message containing both the mention and the image. Direct image upload (via the attachment button) cannot include @mention, so the bot will not respond in groups.
 
-**Processing pipeline:** Gateway downloads media using `GET /im/v1/messages/{message_id}/resources/{key}?type=image` with `tenant_access_token`, resizes to max 1200px, compresses to JPEG (quality 75), base64 encodes, and embeds in the `GatewayEvent.content.attachments` field. OAB core decodes attachments into `ContentBlock::Image` or `ContentBlock::Text` for the AI agent.
+**Processing pipeline:** Gateway downloads media using `GET /im/v1/messages/{message_id}/resources/{key}?type=image` with `tenant_access_token`, resizes to max 1200px, compresses to JPEG (quality 75), and stores to `~/.openab/media/inbound/<uuid>`. The file path is passed in `GatewayEvent.content.attachments[].path`. OAB core reads the file directly from disk and converts to `ContentBlock::Image` or `ContentBlock::Text` for the AI agent.
 
 ## Streaming (Typewriter)
 
@@ -160,6 +240,36 @@ streaming = true
 
 The gateway platform must support message editing (Feishu/Lark do). Platforms that don't support editing should leave `streaming = false` (default).
 
+## Card Streaming
+
+By default (`FEISHU_CARD_STREAMING_MODE=auto`), streaming replies render as
+**interactive CardKit cards** when the content warrants it. Cards have no
+20-edit cap (errcode 230072) and render markdown — including **tables** and code
+blocks — natively, which a `post` message cannot.
+
+| Mode | Behavior |
+|---|---|
+| `auto` (default) | Short replies stay as a `post` (native reply UI); long replies, or any reply containing a code fence or a markdown table, promote to a card. |
+| `card` | Every reply is sent as a card from the first message. |
+| `post` | Card streaming disabled — post-only behavior (the kill-switch). |
+
+Notes:
+
+- **Auto promotion is one-way**: a reply starts as a post and, once promoted,
+  stays a card. Promotion deletes the post placeholder (shown as "message
+  recalled" in Feishu) and re-sends as a card. In `card` mode the first reply is
+  a card from the start, so there is no placeholder and no recall.
+- **Finalize**: after ~`FEISHU_CARD_IDLE_FINALIZE_MS` ms with no further edits,
+  the card is rebuilt as a static card so the typewriter cursor settles and the
+  markdown re-renders cleanly.
+- **Fallback**: if a card API call fails and `FEISHU_CARD_FALLBACK_TO_POST` is
+  `true` (default), the gateway falls back to the post path (with the edit-cap
+  recovery), so a reply is never lost.
+- **Tables wrapped in a code fence**: agents sometimes wrap a markdown table in a
+  bare ``` fence for monospace alignment in environments that don't render
+  tables. On the card path the gateway unwraps a fence whose body is exactly one
+  table so it renders as a native table.
+
 ## Thread (Topic) Replies
 
 When a user replies to a bot message in a group chat, Feishu creates a thread (topic). The bot replies within the same thread, and each thread gets its own independent session.
@@ -171,6 +281,22 @@ To start a threaded conversation: reply to any bot message in a group chat (long
 **Limitation:** Messages sent directly in the Feishu thread panel (not via the "Reply" action) do not include `root_id` and will be treated as regular group messages. Use the "Reply" action to ensure thread context is preserved.
 
 Streaming (typewriter) mode works in threads — edits target the same message regardless of thread context.
+
+## Agent-Controlled Reply-To
+
+Agents can reply to a specific message using the `[[reply_to:message_id]]` output directive (see [docs/output-directives.md](output-directives.md)). The gateway sends the reply via Feishu's native Reply API, showing a quote reference in the UI.
+
+```
+Agent output:
+  [[reply_to:om_xxx]]
+  This is my reply to that specific message.
+```
+
+**How agents get message IDs:** Every incoming message includes `message_id` in the `SenderContext` injected into the agent prompt. Agents can store and reference these IDs to reply to specific messages.
+
+**Fallback:** If the specified message ID is invalid or the Reply API fails, the gateway automatically falls back to a plain send (no quote).
+
+**Use case:** In multi-bot threads, each bot can reply to a different message, creating clear visual conversation threads within a Feishu thread.
 
 ## Bot-to-Bot Collaboration (Gateway-Side Only)
 
@@ -187,6 +313,7 @@ Bot identification requires explicit configuration via `FEISHU_TRUSTED_BOT_IDS` 
 | Problem | Fix |
 |---|---|
 | Bot doesn't respond | Check `FEISHU_APP_ID`/`FEISHU_APP_SECRET` are correct. Check gateway logs for token errors. |
+| Unified mode receives no events | Use a release with unified WebSocket support (v0.10.0+) or use the standalone gateway as a workaround. See #1356 for the transport-mode follow-up. |
 | Bot doesn't respond in groups | Ensure bot is @mentioned, or set `requireMention: false`. Check `botUsername` matches bot's `open_id`. |
 | WebSocket keeps reconnecting | Check event subscription is set to **Long Connection** mode. Check app is published and approved. |
 | Webhook verification fails | Ensure `verificationToken` and `encryptKey` match Feishu app config. |
